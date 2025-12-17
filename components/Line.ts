@@ -1,15 +1,8 @@
 // c:\Users\Ahmad Zani Syechkar\Documents\project\website\jsts\Three.js\my-three3d\src\components\Line.ts
 
 import * as THREE from "three";
+import { SnappingHelper } from "../helpers/snapping-helper";
 
-type SnapKind = "none" | "endpoint" | "midpoint" | "onEdge";
-
-interface SnapResult {
-  kind: SnapKind;
-  point: THREE.Vector3;
-  edge?: { a: THREE.Vector3; b: THREE.Vector3 };
-  dist: number;
-}
 
 export class LineTool {
   private scene: THREE.Scene;
@@ -22,6 +15,7 @@ export class LineTool {
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
   private plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // XY Plane (Z=0)
+  private snappingHelper: SnappingHelper;
 
   // Visual Helpers
   private previewLine: THREE.Line | null = null;
@@ -50,6 +44,13 @@ export class LineTool {
     this.camera = camera;
     this.container = container;
     this.onLineCreated = onLineCreated;
+    this.snappingHelper = new SnappingHelper(
+      this.scene,
+      this.camera,
+      this.container,
+      this.raycaster,
+      this.SNAP_THRESHOLD
+    );
   }
 
   public enable() {
@@ -122,7 +123,7 @@ export class LineTool {
     let snappedAxis: "x" | "y" | "z" | null = null;
 
     // 1. Snap ke Geometri (Endpoint/Midpoint)
-    const snapResult = this.getBestSnap(hit);
+    const snapResult = this.snappingHelper.getBestSnap(hit, this.points);
     if (snapResult) {
       target.copy(snapResult.point);
     }
@@ -146,7 +147,7 @@ export class LineTool {
       let bestAxisPoint: THREE.Vector3 | null = null;
 
       for (const ax of axes) {
-        const info = this.getClosestPointOnAxis(last, ax.dir, mouseScreen);
+        const info = this.snappingHelper.getClosestPointOnAxis(last, ax.dir, mouseScreen);
         if (info.distPixels < bestDist) {
           bestDist = info.distPixels;
           bestAxisPoint = info.point;
@@ -262,84 +263,6 @@ export class LineTool {
     }
 
     return null;
-  }
-
-  private getBestSnap(hit: THREE.Vector3): SnapResult | null {
-    let best: SnapResult | null = null;
-    const consider = (res: SnapResult) => {
-        if (!best || res.dist < best.dist) best = res;
-    };
-
-    // Helper: Check points
-    const checkPoints = (pts: THREE.Vector3[], isLoop = false) => {
-        for (let i = 0; i < pts.length; i++) {
-            const p = pts[i];
-            const d = hit.distanceTo(p);
-            if (d < this.SNAP_THRESHOLD) {
-                consider({ kind: "endpoint", point: p, dist: d });
-            }
-
-            // Midpoint
-            if (i < pts.length - 1) {
-                const mid = new THREE.Vector3().addVectors(pts[i], pts[i+1]).multiplyScalar(0.5);
-                const dMid = hit.distanceTo(mid);
-                if (dMid < this.SNAP_THRESHOLD) {
-                    consider({ kind: "midpoint", point: mid, dist: dMid });
-                }
-            }
-        }
-    };
-
-    // 1. Check current drawing points
-    checkPoints(this.points);
-
-    // 2. Check scene lines (simplified)
-    this.scene.traverse((obj) => {
-        if ((obj as any).isLine && !(obj as any).userData.isHelper) {
-            const geom = (obj as THREE.Line).geometry;
-            if (geom instanceof THREE.BufferGeometry) {
-                const pos = geom.attributes.position;
-                if (pos) {
-                    const pts: THREE.Vector3[] = [];
-                    for(let i=0; i<pos.count; i++) {
-                        pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
-                    }
-                    checkPoints(pts);
-                }
-            }
-        }
-    });
-
-    return best;
-  }
-
-  private getClosestPointOnAxis(origin: THREE.Vector3, axisDir: THREE.Vector3, mouseScreen: THREE.Vector2) {
-    const ray = this.raycaster.ray;
-    const dirNorm = axisDir.clone().normalize();
-    
-    // Project ray to line (shortest distance between two skew lines logic)
-    // But simpler: find point on axis-line closest to ray
-    const w0 = new THREE.Vector3().subVectors(ray.origin, origin);
-    const a = ray.direction.dot(dirNorm);
-    const b = ray.direction.dot(w0);
-    const c = dirNorm.dot(w0);
-    const d = 1 - a * a;
-
-    let t = 0;
-    if (d > 1e-6) {
-        t = (c - a * b) / d;
-    }
-    const pointOnAxis = origin.clone().addScaledVector(dirNorm, t);
-    
-    // Project to screen to check pixel distance
-    const pScreen = pointOnAxis.clone().project(this.camera);
-    const rect = this.container.getBoundingClientRect();
-    const x = (pScreen.x * 0.5 + 0.5) * rect.width;
-    const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
-    
-    const distPixels = Math.sqrt(Math.pow(x - (mouseScreen.x + rect.left), 2) + Math.pow(y - (mouseScreen.y + rect.top), 2)); // Approx
-
-    return { point: pointOnAxis, distPixels };
   }
 
   private finalizeLine() {
