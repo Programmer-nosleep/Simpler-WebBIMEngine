@@ -8,7 +8,14 @@
   </head>
   <body>
     <canvas id="threejs"></canvas>
-    <div id="app"></div>
+    <div id="ui">
+      <label for="projectionMode">Camera</label>
+      <select id="projectionMode">
+        <option value="Perspective">Perspective</option>
+        <option value="Orthographic">Orthographic</option>
+      </select>
+      <button id="projectionToggle" type="button">Toggle</button>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

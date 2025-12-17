@@ -19,4 +19,54 @@
   overflow: hidden;
 }
 
-/* #threejs { box-shadow: inset 0 0 0 2px #fff; } */
+html,
+body,
+#threejs {
+  width: 100%;
+  height: 100%;
+}
+
+#threejs {
+  position: fixed;
+  inset: 0;
+}
+
+#threejs canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#ui {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(6px);
+}
+
+#ui label {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+#ui select,
+#ui button {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 20, 20, 0.85);
+  color: inherit;
+}
+
+#ui button {
+  cursor: pointer;
+}
