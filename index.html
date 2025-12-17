@@ -7,14 +7,30 @@
     <title>my-three3d</title>
   </head>
   <body>
-    <canvas id="threejs"></canvas>
-    <div id="ui">
-      <label for="projectionMode">Camera</label>
-      <select id="projectionMode">
-        <option value="Perspective">Perspective</option>
-        <option value="Orthographic">Orthographic</option>
-      </select>
-      <button id="projectionToggle" type="button">Toggle</button>
+    <div id="threejs"></div>
+    <div id="ui-floating">
+      <div id="ui-panels">
+        <div class="control-panel">
+          <label for="projectionMode">Camera</label>
+          <div class="control-row">
+            <select id="projectionMode">
+              <option value="Perspective">Perspective</option>
+              <option value="Orthographic">Orthographic</option>
+            </select>
+            <button id="projectionToggle" type="button">Toggle</button>
+          </div>
+        </div>
+        <div class="control-panel">
+          <label for="navigationMode">Navigation</label>
+          <div class="control-row">
+            <select id="navigationMode">
+              <option value="Orbit">Orbit</option>
+              <option value="Plan">Plan</option>
+            </select>
+          </div>
+        </div>
+        <aside id="leftSidebar" aria-label="Project views sidebar"></aside>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

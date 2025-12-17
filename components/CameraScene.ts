@@ -23,6 +23,9 @@ export type CameraSceneApi = {
   toggleProjection: () => Promise<void>;
   getProjection: () => CameraProjectionMode;
   onProjectionChanged: (handler: (projection: CameraProjectionMode) => void) => () => void;
+  setNavigationMode: (mode: OBC.NavModeID) => void;
+  getNavigationMode: () => OBC.NavModeID;
+  onNavigationModeChanged: (handler: (mode: OBC.NavModeID) => void) => () => void;
   dispose: () => void;
 };
 
@@ -39,6 +42,7 @@ export async function createCameraScene(
     antialias: true,
     ...config.rendererParameters,
   });
+  world.renderer.mode = OBC.RendererMode.AUTO;
   world.camera = new OBC.OrthoPerspectiveCamera(components);
 
   components.init();
@@ -51,6 +55,8 @@ export async function createCameraScene(
   }
 
   world.renderer.three.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  world.renderer.resize();
+  world.camera.updateAspect();
 
   const lookAtPosition = config.lookAt?.position ?? [0, 0, 5];
   const lookAtTarget = config.lookAt?.target ?? [0, 0, 0];
@@ -61,6 +67,19 @@ export async function createCameraScene(
   );
 
   const getProjection = () => world.camera.projection.current as CameraProjectionMode;
+  const getNavigationMode = () => world.camera.mode.id as OBC.NavModeID;
+
+  const navigationHandlers = new Set<(mode: OBC.NavModeID) => void>();
+  const notifyNavigationChange = () => {
+    const current = getNavigationMode();
+    navigationHandlers.forEach((handler) => handler(current));
+  };
+
+  const originalNavigationSetter = world.camera.set.bind(world.camera);
+  world.camera.set = ((mode: OBC.NavModeID) => {
+    originalNavigationSetter(mode);
+    notifyNavigationChange();
+  }) as typeof world.camera.set;
 
   return {
     components,
@@ -80,6 +99,16 @@ export async function createCameraScene(
       const callback = () => handler(getProjection());
       world.camera.projection.onChanged.add(callback);
       return () => world.camera.projection.onChanged.remove(callback);
+    },
+    setNavigationMode: (mode) => {
+      if (getNavigationMode() === mode) return;
+      world.camera.set(mode);
+    },
+    getNavigationMode,
+    onNavigationModeChanged: (handler) => {
+      navigationHandlers.add(handler);
+      handler(getNavigationMode());
+      return () => navigationHandlers.delete(handler);
     },
     dispose: () => {
       components.dispose();

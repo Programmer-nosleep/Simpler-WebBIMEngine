@@ -1,28 +1,41 @@
+import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+import type { CameraProjectionMode, CameraSceneApi } from "./CameraScene";
 
-async function GridWorld() {
-  const components = new OBC.Components();
- 
-  const worlds = components.get(OBC.Worlds);
-  const world = worlds.create<
-    OBC.SimpleScene,
-    OBC.SimpleCamera,
-    OBC.SimpleRenderer
-  >();
+export type GridOptions = {
+  color?: THREE.ColorRepresentation;
+  primarySize?: number;
+  secondarySize?: number;
+  distance?: number;
+  yOffset?: number;
+};
 
-  world.scene = new OBC.SimpleScene(components);
-  world.scene.setup();
-  world.scene.three.background = null;
+export function setupGrid(cameraScene: CameraSceneApi, options: GridOptions = {}) {
+  const grids = cameraScene.components.get(OBC.Grids);
+  const grid = grids.create(cameraScene.world);
 
-  const container = document.getElementById("threejs") as HTMLDivElement;
-  world.renderer = new OBC.SimpleRenderer(components, container);
-  world.camera = new OBC.OrthoPerspectiveCamera(components);
-  await world.camera.controls.setLookAt(68, 23, -8.5, 21.5, -5.5, 23);
+  grid.setup({
+    visible: true,
+    color: new THREE.Color(options.color ?? 0xbbbbbb),
+    primarySize: options.primarySize ?? 1,
+    secondarySize: options.secondarySize ?? 10,
+    distance: options.distance ?? 500,
+  });
 
-  components.init();
-}
+  grid.three.position.y = options.yOffset ?? 0;
 
-function setup() {
-  GridWorld();
-  
+  const applyFade = (projection: CameraProjectionMode) => {
+    grid.fade = projection === "Perspective";
+  };
+
+  applyFade(cameraScene.getProjection());
+  const unsubscribe = cameraScene.onProjectionChanged(applyFade);
+
+  return {
+    grid,
+    dispose() {
+      unsubscribe();
+      grids.delete(cameraScene.world);
+    },
+  };
 }

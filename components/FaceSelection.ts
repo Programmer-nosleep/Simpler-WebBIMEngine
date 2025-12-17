@@ -11,6 +11,7 @@ export type FaceSelectionOptions = {
   faceHoverColor: number;
   canvas: HTMLCanvasElement;
   camera: THREE.Camera;
+  getCamera?: () => THREE.Camera;
   dotSpacing?: number;
   surfaceOffset?: number;
   dotColor?: number;
@@ -29,6 +30,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     canvas,
     camera,
   } = options;
+
+  const getActiveCamera = options.getCamera ?? (() => camera);
 
   const DOT_SPACING = options.dotSpacing ?? 0.03;
   const SURFACE_OFFSET = options.surfaceOffset ?? 0.001;
@@ -241,7 +244,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const onPointerMove = (event: PointerEvent) => {
     setPointerFromEvent(event);
-    raycaster.setFromCamera(pointer, camera);
+    raycaster.setFromCamera(pointer, getActiveCamera());
 
     hoveredFace = pickFace()?.materialIndex ?? null;
     canvas.style.cursor = hoveredFace !== null ? "pointer" : "";
@@ -256,7 +259,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const onClick = (event: MouseEvent) => {
     setPointerFromEvent(event);
-    raycaster.setFromCamera(pointer, camera);
+    raycaster.setFromCamera(pointer, getActiveCamera());
 
     const hit = pickFace();
     hoveredFace = hit?.materialIndex ?? null;
@@ -268,7 +271,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const onDoubleClick = (event: MouseEvent) => {
     setPointerFromEvent(event);
-    raycaster.setFromCamera(pointer, camera);
+    raycaster.setFromCamera(pointer, getActiveCamera());
 
     const hit = pickFace();
     if (!hit) return;
@@ -289,11 +292,20 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   canvas.addEventListener("click", onClick);
   canvas.addEventListener("dblclick", onDoubleClick);
 
+  const setSelectionByNormal = (normal: THREE.Vector3 | null, border = true) => {
+    selectedFace = null;
+    selectedFaceNormal = normal ? normal.clone() : null;
+    showSelectedBorder = border && !!normal;
+    hoveredFace = null;
+    updateSelectEffect();
+  };
+
   updateSelectEffect();
   requestAnimationFrame(updateSelectEffect);
 
   return {
     updateSelectEffect,
+    setSelectionByNormal,
     dispose() {
       window.removeEventListener("resize", onResize);
       canvas.removeEventListener("pointermove", onPointerMove);
