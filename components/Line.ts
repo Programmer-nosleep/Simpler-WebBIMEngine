@@ -1,140 +1,542 @@
-// lineTool.ts
+// c:\Users\Ahmad Zani Syechkar\Documents\project\website\jsts\Three.js\my-three3d\src\components\Line.ts
+
 import * as THREE from "three";
-import { getMouseNDC, raycastToZ0Plane } from "./utils/line/plane";
-import { SnapManager, type Segment, type SnapHit } from "./utils/line/snap";
-import { SnapIndicator, DashedLinePreview } from "./utils/line/ui";
+
+type SnapKind = "none" | "endpoint" | "midpoint" | "onEdge";
+
+interface SnapResult {
+  kind: SnapKind;
+  point: THREE.Vector3;
+  edge?: { a: THREE.Vector3; b: THREE.Vector3 };
+  dist: number;
+}
 
 export class LineTool {
   private scene: THREE.Scene;
   private camera: THREE.Camera;
-  private dom: HTMLElement;
-  private snap: SnapManager;
-  private onMeshCreated?: (mesh: THREE.Mesh) => void;
+  private container: HTMLElement;
+  private onLineCreated: (mesh: THREE.Object3D) => void;
 
+  private enabled = false;
+  private points: THREE.Vector3[] = [];
   private raycaster = new THREE.Raycaster();
-  private ndc = new THREE.Vector2();
+  private mouse = new THREE.Vector2();
+  private plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // XY Plane (Z=0)
 
-  private polyline: THREE.Vector3[] = [];
-  private segments: Segment[] = [];
+  // Visual Helpers
+  private previewLine: THREE.Line | null = null;
+  private connectorDot: THREE.Sprite | null = null;
+  private axisGuide: THREE.Line | null = null;
+  private anchorSprite: THREE.Sprite | null = null;
+  private hoverMarkers: THREE.Group | null = null;
+  private axisInfoEl: HTMLDivElement | null = null;
+  private inputEl: HTMLInputElement | null = null;
 
-  private currentFrom: THREE.Vector3 | null = null;
-  private currentSnap: SnapHit | null = null;
+  // State
+  private typedLength = "";
+  private tempVec3 = new THREE.Vector3();
 
-  private preview: DashedLinePreview;
-  private snapUI: SnapIndicator;
-
-  private committedLines: THREE.Line[] = [];
+  // Constants
+  private readonly SNAP_THRESHOLD = 0.3;
+  private readonly AXIS_SNAP_PIXELS = 15;
 
   constructor(
     scene: THREE.Scene,
     camera: THREE.Camera,
-    dom: HTMLElement,
-    snap: SnapManager,
-    onMeshCreated?: (mesh: THREE.Mesh) => void
+    container: HTMLElement,
+    onLineCreated: (mesh: THREE.Object3D) => void
   ) {
     this.scene = scene;
     this.camera = camera;
-    this.dom = dom;
-    this.snap = snap;
-    this.onMeshCreated = onMeshCreated;
-
-    this.preview = new DashedLinePreview(this.scene);
-    this.snapUI = new SnapIndicator(this.scene);
+    this.container = container;
+    this.onLineCreated = onLineCreated;
   }
 
-  enable() {
-    this.dom.addEventListener("pointermove", this.onMove);
-    this.dom.addEventListener("pointerdown", this.onDown);
-  }
-  disable() {
-    this.dom.removeEventListener("pointermove", this.onMove);
-    this.dom.removeEventListener("pointerdown", this.onDown);
-    this.preview.hide();
-    this.snapUI.hide();
+  public enable() {
+    if (this.enabled) return;
+    this.enabled = true;
+    this.points = [];
+    this.typedLength = "";
+    this.container.style.cursor = "crosshair";
+
+    this.container.addEventListener("pointermove", this.onPointerMove);
+    this.container.addEventListener("pointerdown", this.onPointerDown);
+    window.addEventListener("keydown", this.onKeyDown);
   }
 
-  private onMove = (e: PointerEvent) => {
-    this.ndc.copy(getMouseNDC(e, this.dom));
-    const hit = raycastToZ0Plane(this.raycaster, this.camera, this.ndc);
+  public disable() {
+    if (!this.enabled) return;
+    this.enabled = false;
+    this.container.style.cursor = "default";
+
+    this.container.removeEventListener("pointermove", this.onPointerMove);
+    this.container.removeEventListener("pointerdown", this.onPointerDown);
+    window.removeEventListener("keydown", this.onKeyDown);
+
+    this.cleanupVisuals();
+    this.removeInputOverlay();
+    this.hideAxisInfo();
+  }
+
+  private cleanupVisuals() {
+    const removeObj = (obj: THREE.Object3D | null) => {
+      if (obj) {
+        this.scene.remove(obj);
+        if ((obj as any).geometry) (obj as any).geometry.dispose();
+        if ((obj as any).material) {
+            if (Array.isArray((obj as any).material)) {
+                (obj as any).material.forEach((m: any) => m.dispose());
+            } else {
+                (obj as any).material.dispose();
+            }
+        }
+      }
+    };
+
+    removeObj(this.previewLine);
+    removeObj(this.connectorDot);
+    removeObj(this.axisGuide);
+    removeObj(this.anchorSprite);
+    removeObj(this.hoverMarkers);
+
+    this.previewLine = null;
+    this.connectorDot = null;
+    this.axisGuide = null;
+    this.anchorSprite = null;
+    this.hoverMarkers = null;
+  }
+
+  // --- Event Handlers ---
+
+  private onPointerMove = (e: PointerEvent) => {
+    if (!this.enabled) return;
+    
+    // Skip jika sedang navigasi (Shift/Middle click)
+    if (e.shiftKey && (e.buttons & 1) === 1) return;
+    if ((e.buttons & 4) === 4) return;
+
+    const hit = this.pickPoint(e);
     if (!hit) return;
-    hit.z = 0;
 
-    const snapHit = this.snap.findBestSnap(hit, this.raycaster, this.camera, this.ndc);
-    this.currentSnap = snapHit;
+    let target = hit.clone();
+    let snappedAxis: "x" | "y" | "z" | null = null;
 
-    const p = (snapHit ? snapHit.point : hit).clone();
-    p.z = 0;
-
-    if (snapHit) this.snapUI.show(snapHit.type, snapHit.point);
-    else this.snapUI.hide();
-
-    if (this.currentFrom) this.preview.set(this.currentFrom, p);
-    else this.preview.hide();
-  };
-
-  private onDown = (e: PointerEvent) => {
-    if (e.button !== 0) return;
-
-    this.ndc.copy(getMouseNDC(e, this.dom));
-    const hit = raycastToZ0Plane(this.raycaster, this.camera, this.ndc);
-    if (!hit) return;
-
-    const p = (this.currentSnap ? this.currentSnap.point : hit).clone();
-    p.z = 0;
-
-    if (!this.currentFrom) {
-      this.currentFrom = p;
-      this.polyline = [p.clone()];
-      return;
+    // 1. Snap ke Geometri (Endpoint/Midpoint)
+    const snapResult = this.getBestSnap(hit);
+    if (snapResult) {
+      target.copy(snapResult.point);
     }
 
-    const first = this.polyline[0];
-    const closeThreshold = this.snap.snapThreshold;
+    // 2. Axis Locking (Inference)
+    if (!snapResult && this.points.length > 0) {
+      const last = this.points[this.points.length - 1];
+      const rect = this.container.getBoundingClientRect();
+      const mouseScreen = new THREE.Vector2(
+        e.clientX - rect.left,
+        e.clientY - rect.top
+      );
 
-    if (p.distanceTo(first) <= closeThreshold && this.polyline.length >= 3) {
-      this.polyline.push(first.clone());
-      this.commitSegment(this.currentFrom, first);
-      this.finishAsMesh();
-      this.reset();
-      return;
+      const axes = [
+        { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
+        { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
+        // { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) } // Uncomment jika ingin Z-axis snap
+      ];
+
+      let bestDist = this.AXIS_SNAP_PIXELS;
+      let bestAxisPoint: THREE.Vector3 | null = null;
+
+      for (const ax of axes) {
+        const info = this.getClosestPointOnAxis(last, ax.dir, mouseScreen);
+        if (info.distPixels < bestDist) {
+          bestDist = info.distPixels;
+          bestAxisPoint = info.point;
+          snappedAxis = ax.name;
+        }
+      }
+
+      if (bestAxisPoint && snappedAxis) {
+        target.copy(bestAxisPoint);
+      }
     }
 
-    this.commitSegment(this.currentFrom, p);
-    this.polyline.push(p.clone());
-    this.currentFrom = p;
+    // Update Visuals
+    this.updateConnectorDot(target, snapResult?.kind);
+    this.updateAxisGuide(snappedAxis, this.points[this.points.length - 1]);
+    this.updatePreviewLine(target);
+    this.updateHoverMarkers(snapResult?.edge);
+    
+    if (this.points.length > 0) {
+        this.updateAxisInfo(this.points[this.points.length - 1], target, snappedAxis);
+    }
   };
 
-  private commitSegment(a: THREE.Vector3, b: THREE.Vector3) {
-    const geo = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
-    const mat = new THREE.LineBasicMaterial({ color: 0x111111 });
-    const line = new THREE.Line(geo, mat);
-    line.userData.selectable = true;
-    this.scene.add(line);
-    this.committedLines.push(line);
+  private onPointerDown = (e: PointerEvent) => {
+    if (!this.enabled || e.button !== 0) return;
+    // Cegah event bubbling agar tidak trigger orbit controls selection
+    // e.stopPropagation(); 
 
-    this.segments.push({ a: a.clone(), b: b.clone() });
-    this.snap.setSegments(this.segments);
+    let target: THREE.Vector3 | null = null;
+    
+    // Prioritaskan posisi dot connector yang sudah ter-snap
+    if (this.connectorDot) {
+        target = this.connectorDot.position.clone();
+    } else {
+        target = this.pickPoint(e);
+    }
+
+    if (!target) return;
+
+    // Close loop check
+    if (this.points.length >= 2) {
+        if (target.distanceTo(this.points[0]) < this.SNAP_THRESHOLD) {
+            this.points.push(this.points[0].clone());
+            this.finalizeLine();
+            return;
+        }
+    }
+
+    // Handle Typed Length
+    if (this.points.length > 0 && this.typedLength) {
+        const len = parseFloat(this.typedLength);
+        if (isFinite(len) && len > 0) {
+            const last = this.points[this.points.length - 1];
+            const dir = new THREE.Vector3().subVectors(target, last).normalize();
+            target = last.clone().addScaledVector(dir, len);
+            this.typedLength = "";
+            this.removeInputOverlay();
+        }
+    }
+
+    this.points.push(target);
+    this.updateAnchorSprite(target);
+
+    if (this.points.length === 1) {
+        this.showInputOverlay(e.clientX, e.clientY);
+    }
+  };
+
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (!this.enabled) return;
+
+    if (e.key === "Enter") {
+        if (this.points.length > 1) this.finalizeLine();
+    } else if (e.key === "Backspace") {
+        this.typedLength = this.typedLength.slice(0, -1);
+        this.updateInputDisplay();
+    } else if (/^[0-9.]$/.test(e.key)) {
+        this.typedLength += e.key;
+        this.updateInputDisplay();
+        // Jika input box belum muncul (misal user mengetik tanpa klik pertama), munculkan di tengah atau dekat mouse
+        if (!this.inputEl && this.points.length > 0) {
+             // Fallback position logic could go here
+        }
+    }
+  };
+
+  // --- Logic Helpers ---
+
+  private pickPoint(e: PointerEvent): THREE.Vector3 | null {
+    const rect = this.container.getBoundingClientRect();
+    this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    // 1. Raycast ke object scene (exclude helpers)
+    const candidates: THREE.Object3D[] = [];
+    this.scene.traverse((obj) => {
+        if ((obj as any).isMesh || (obj as any).isLine) {
+            if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).userData.isHelper) return;
+            candidates.push(obj);
+        }
+    });
+
+    const hits = this.raycaster.intersectObjects(candidates, true);
+    if (hits.length > 0) {
+        return hits[0].point;
+    }
+
+    // 2. Raycast ke Plane Z=0 (XY Plane)
+    if (this.raycaster.ray.intersectPlane(this.plane, this.tempVec3)) {
+        return this.tempVec3.clone();
+    }
+
+    return null;
   }
 
-  private finishAsMesh() {
-    const pts2 = this.polyline.slice(0, -1).map(v => new THREE.Vector2(v.x, v.y));
-    const shape = new THREE.Shape(pts2);
+  private getBestSnap(hit: THREE.Vector3): SnapResult | null {
+    let best: SnapResult | null = null;
+    const consider = (res: SnapResult) => {
+        if (!best || res.dist < best.dist) best = res;
+    };
 
-    const geom = new THREE.ShapeGeometry(shape);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, side: THREE.DoubleSide });
+    // Helper: Check points
+    const checkPoints = (pts: THREE.Vector3[], isLoop = false) => {
+        for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            const d = hit.distanceTo(p);
+            if (d < this.SNAP_THRESHOLD) {
+                consider({ kind: "endpoint", point: p, dist: d });
+            }
 
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.userData.selectable = true;
-    mesh.position.z = 0;
-    this.scene.add(mesh);
-    this.onMeshCreated?.(mesh);
+            // Midpoint
+            if (i < pts.length - 1) {
+                const mid = new THREE.Vector3().addVectors(pts[i], pts[i+1]).multiplyScalar(0.5);
+                const dMid = hit.distanceTo(mid);
+                if (dMid < this.SNAP_THRESHOLD) {
+                    consider({ kind: "midpoint", point: mid, dist: dMid });
+                }
+            }
+        }
+    };
+
+    // 1. Check current drawing points
+    checkPoints(this.points);
+
+    // 2. Check scene lines (simplified)
+    this.scene.traverse((obj) => {
+        if ((obj as any).isLine && !(obj as any).userData.isHelper) {
+            const geom = (obj as THREE.Line).geometry;
+            if (geom instanceof THREE.BufferGeometry) {
+                const pos = geom.attributes.position;
+                if (pos) {
+                    const pts: THREE.Vector3[] = [];
+                    for(let i=0; i<pos.count; i++) {
+                        pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+                    }
+                    checkPoints(pts);
+                }
+            }
+        }
+    });
+
+    return best;
   }
 
-  private reset() {
-    this.currentFrom = null;
-    this.currentSnap = null;
-    this.preview.hide();
-    this.snapUI.hide();
-    this.polyline = [];
+  private getClosestPointOnAxis(origin: THREE.Vector3, axisDir: THREE.Vector3, mouseScreen: THREE.Vector2) {
+    const ray = this.raycaster.ray;
+    const dirNorm = axisDir.clone().normalize();
+    
+    // Project ray to line (shortest distance between two skew lines logic)
+    // But simpler: find point on axis-line closest to ray
+    const w0 = new THREE.Vector3().subVectors(ray.origin, origin);
+    const a = ray.direction.dot(dirNorm);
+    const b = ray.direction.dot(w0);
+    const c = dirNorm.dot(w0);
+    const d = 1 - a * a;
+
+    let t = 0;
+    if (d > 1e-6) {
+        t = (c - a * b) / d;
+    }
+    const pointOnAxis = origin.clone().addScaledVector(dirNorm, t);
+    
+    // Project to screen to check pixel distance
+    const pScreen = pointOnAxis.clone().project(this.camera);
+    const rect = this.container.getBoundingClientRect();
+    const x = (pScreen.x * 0.5 + 0.5) * rect.width;
+    const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
+    
+    const distPixels = Math.sqrt(Math.pow(x - (mouseScreen.x + rect.left), 2) + Math.pow(y - (mouseScreen.y + rect.top), 2)); // Approx
+
+    return { point: pointOnAxis, distPixels };
+  }
+
+  private finalizeLine() {
+    if (this.points.length < 2) {
+        this.disable(); // Cancel if not enough points
+        return;
+    }
+
+    // Check for closed loop (min 3 unique points + 1 closing point = 4 points)
+    const isClosed = this.points.length > 3 && this.points[0].distanceTo(this.points[this.points.length - 1]) < 1e-5;
+    let object: THREE.Object3D;
+
+    if (isClosed) {
+        const shape = new THREE.Shape();
+        shape.moveTo(this.points[0].x, this.points[0].y);
+        for (let i = 1; i < this.points.length - 1; i++) {
+            shape.lineTo(this.points[i].x, this.points[i].y);
+        }
+        shape.closePath();
+
+        const geometry = new THREE.ShapeGeometry(shape);
+        const material = new THREE.MeshBasicMaterial({ color: 0xcccccc, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.z = this.points[0].z;
+
+        const edges = new THREE.EdgesGeometry(geometry);
+        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+        mesh.add(line);
+        object = mesh;
+    } else {
+        const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
+        const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+        object = new THREE.Line(geometry, material);
+    }
+
+    object.userData.selectable = true;
+    this.scene.add(object);
+    this.onLineCreated(object);
+
+    // Reset state but keep tool active
+    this.points = [];
+    this.typedLength = "";
+    this.cleanupVisuals();
+    this.removeInputOverlay();
+    this.hideAxisInfo();
+  }
+
+  // --- Visual Updaters ---
+
+  private updateConnectorDot(pos: THREE.Vector3, snapKind?: SnapKind) {
+    if (!this.connectorDot) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 64; canvas.height = 64;
+        const ctx = canvas.getContext("2d")!;
+        ctx.beginPath(); ctx.arc(32, 32, 16, 0, Math.PI*2); ctx.fillStyle = "#fff"; ctx.fill();
+        ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.stroke();
+        
+        const tex = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+        this.connectorDot = new THREE.Sprite(mat);
+        this.connectorDot.scale.set(0.5, 0.5, 1);
+        this.connectorDot.renderOrder = 999;
+        this.connectorDot.userData.isHelper = true;
+        this.scene.add(this.connectorDot);
+    }
+    this.connectorDot.position.copy(pos);
+    
+    const mat = this.connectorDot.material;
+    if (snapKind === "endpoint") mat.color.setHex(0x00ff00);
+    else if (snapKind === "midpoint") mat.color.setHex(0x00ffff);
+    else mat.color.setHex(0xffffff);
+  }
+
+  private updatePreviewLine(currentPos: THREE.Vector3) {
+    if (this.points.length === 0) return;
+    
+    const pts = [...this.points, currentPos];
+    const geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    
+    if (!this.previewLine) {
+        const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+        this.previewLine = new THREE.Line(geometry, material);
+        this.previewLine.userData.isHelper = true;
+        this.scene.add(this.previewLine);
+    } else {
+        this.previewLine.geometry.dispose();
+        this.previewLine.geometry = geometry;
+    }
+  }
+
+  private updateAxisGuide(axis: "x" | "y" | "z" | null, origin?: THREE.Vector3) {
+    if (!axis || !origin) {
+        if (this.axisGuide) this.axisGuide.visible = false;
+        return;
+    }
+
+    if (!this.axisGuide) {
+        const geom = new THREE.BufferGeometry();
+        const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        this.axisGuide = new THREE.Line(geom, mat);
+        this.axisGuide.userData.isHelper = true;
+        this.scene.add(this.axisGuide);
+    }
+
+    this.axisGuide.visible = true;
+    const mat = this.axisGuide.material as THREE.LineBasicMaterial;
+    mat.color.setHex(axis === 'x' ? 0xff0000 : axis === 'y' ? 0x00ff00 : 0x0000ff);
+
+    const dir = axis === 'x' ? new THREE.Vector3(1,0,0) : axis === 'y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+    const p1 = origin.clone().addScaledVector(dir, -1000);
+    const p2 = origin.clone().addScaledVector(dir, 1000);
+    this.axisGuide.geometry.setFromPoints([p1, p2]);
+  }
+
+  private updateAnchorSprite(pos: THREE.Vector3) {
+      // Optional: Mark vertices
+  }
+
+  private updateHoverMarkers(edge?: {a: THREE.Vector3, b: THREE.Vector3}) {
+      // Optional: Highlight edge being snapped to
+  }
+
+  // --- UI Overlays ---
+
+  private showInputOverlay(x: number, y: number) {
+    if (!this.inputEl) {
+        this.inputEl = document.createElement("input");
+        this.inputEl.type = "text";
+        this.inputEl.placeholder = "Length...";
+        this.inputEl.className = "control-panel"; // Reuse style
+        Object.assign(this.inputEl.style, {
+            position: "fixed",
+            zIndex: "10000",
+            width: "100px",
+            padding: "4px 8px",
+            fontSize: "12px",
+            pointerEvents: "none", // Let user type but not click? Or focus it?
+            // Actually for SketchUp style, you just type. We display what is typed.
+            background: "rgba(255, 255, 255, 0.9)",
+            color: "black",
+            border: "1px solid #ccc",
+            borderRadius: "4px"
+        });
+        document.body.appendChild(this.inputEl);
+    }
+    this.inputEl.style.left = `${x + 15}px`;
+    this.inputEl.style.top = `${y + 15}px`;
+    this.updateInputDisplay();
+  }
+
+  private updateInputDisplay() {
+      if (this.inputEl) {
+          this.inputEl.value = this.typedLength;
+          this.inputEl.style.display = this.points.length > 0 ? "block" : "none";
+      }
+  }
+
+  private removeInputOverlay() {
+      if (this.inputEl) {
+          this.inputEl.remove();
+          this.inputEl = null;
+      }
+  }
+
+  private updateAxisInfo(last: THREE.Vector3, curr: THREE.Vector3, axis: string | null) {
+      if (!this.axisInfoEl) {
+          this.axisInfoEl = document.createElement("div");
+          Object.assign(this.axisInfoEl.style, {
+              position: "fixed",
+              zIndex: "9999",
+              padding: "4px 8px",
+              fontSize: "11px",
+              borderRadius: "4px",
+              background: "rgba(0,0,0,0.7)",
+              color: "#fff",
+              pointerEvents: "none",
+              whiteSpace: "pre",
+          });
+          document.body.appendChild(this.axisInfoEl);
+      }
+      
+      const dist = last.distanceTo(curr);
+      const axisLabel = axis ? `Axis: ${axis.toUpperCase()}` : "Free";
+      this.axisInfoEl.innerText = `Len: ${dist.toFixed(2)}m\n${axisLabel}`;
+      
+      // Position near mouse
+      const rect = this.container.getBoundingClientRect();
+      const pScreen = curr.clone().project(this.camera);
+      const x = (pScreen.x * 0.5 + 0.5) * rect.width + rect.left;
+      const y = (-pScreen.y * 0.5 + 0.5) * rect.height + rect.top;
+      
+      this.axisInfoEl.style.left = `${x + 20}px`;
+      this.axisInfoEl.style.top = `${y + 20}px`;
+      this.axisInfoEl.style.display = "block";
+  }
+
+  private hideAxisInfo() {
+      if (this.axisInfoEl) this.axisInfoEl.style.display = "none";
   }
 }
