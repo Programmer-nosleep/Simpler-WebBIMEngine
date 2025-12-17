@@ -108,6 +108,7 @@ export class LineTool {
     const geo = new THREE.BufferGeometry().setFromPoints([a.clone(), b.clone()]);
     const mat = new THREE.LineBasicMaterial({ color: 0x111111 });
     const line = new THREE.Line(geo, mat);
+    line.userData.selectable = true;
     this.scene.add(line);
     this.committedLines.push(line);
 
@@ -123,6 +124,7 @@ export class LineTool {
     const mat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, side: THREE.DoubleSide });
 
     const mesh = new THREE.Mesh(geom, mat);
+    mesh.userData.selectable = true;
     mesh.position.z = 0;
     this.scene.add(mesh);
     this.onMeshCreated?.(mesh);

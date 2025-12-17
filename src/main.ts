@@ -1,5 +1,6 @@
 import './style.css'
 import * as THREE from "three";
+import { SkyDomeHelper, SkyDomeUI } from '../helpers/skydome';
 import { setupFaceSelection } from "../components/FaceSelection";
 import { AxesGizmo } from "../components/Gizmo";
 import { type CameraProjectionMode, createCameraScene } from "../components/CameraScene";
@@ -54,15 +55,34 @@ const updateGizmoCamera = () => {
 	worldRenderer.onAfterUpdate.add(renderGizmo);
 	updateGizmoCamera();
 
-	const selectableObjects: THREE.Object3D[] = [];
 	const selectedObjects = new Set<THREE.Object3D>();
 	const selectionColor = new THREE.Color(0x4f8cff);
 
+	const isSelectableRoot = (object: THREE.Object3D) =>
+		(object.userData as { selectable?: boolean } | undefined)?.selectable === true;
+	const getSelectableRoots = () => {
+		const roots: THREE.Object3D[] = [];
+		scene.traverse((obj) => {
+			if (isSelectableRoot(obj)) roots.push(obj);
+		});
+		return roots;
+	};
+
+	const syncFaceSelection = () => {
+		if (selectedObjects.size > 0) {
+			faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
+		} else {
+			faceSelection.setSelectionByNormal(null);
+		}
+	};
+
 	const setObjectSelection = (object: THREE.Object3D, selected: boolean) => {
 		object.traverse((child) => {
-			const mesh = child as THREE.Mesh;
-			if (!(mesh as any).isMesh) return;
-			const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+			if ((child.userData as { selectable?: boolean } | undefined)?.selectable === false) return;
+			if (!(child as any).isMesh && !(child as any).isLine && !(child as any).isLineSegments) return;
+			const materialValue = (child as any).material as THREE.Material | THREE.Material[] | undefined;
+			if (!materialValue) return;
+			const materials = Array.isArray(materialValue) ? materialValue : [materialValue];
 			materials.forEach((material) => {
 			const mat = material as THREE.Material & { color?: THREE.Color };
 			if (!mat || !(mat as any).color) return;
@@ -104,7 +124,7 @@ const selectObjectsInRect = (rect: SelectionRect) => {
 
 const selected: THREE.Object3D[] = [];
 
-selectableObjects.forEach((object) => {
+getSelectableRoots().forEach((object) => {
 	box.setFromObject(object);
 	if (box.isEmpty()) return;
 	corners[0].set(box.min.x, box.min.y, box.min.z);
@@ -134,15 +154,17 @@ selectableObjects.forEach((object) => {
 	return selected;
 };
 
-	const updateSelections = (rect: SelectionRect) => {
+	const updateSelections = (rect: SelectionRect, selectionOptions?: { additive?: boolean }) => {
 		const newlySelected = selectObjectsInRect(rect);
-		const previous = Array.from(selectedObjects);
-		previous.forEach((obj) => {
-		if (!newlySelected.includes(obj)) {
-			setObjectSelection(obj, false);
-		selectedObjects.delete(obj);
-	}
-});
+		if (!selectionOptions?.additive) {
+			const previous = Array.from(selectedObjects);
+			previous.forEach((obj) => {
+				if (!newlySelected.includes(obj)) {
+					setObjectSelection(obj, false);
+					selectedObjects.delete(obj);
+				}
+			});
+		}
 
 newlySelected.forEach((obj) => {
 	if (!selectedObjects.has(obj)) {
@@ -151,20 +173,85 @@ newlySelected.forEach((obj) => {
 	}
 });
 
-if (selectedObjects.size > 0) {
-      faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
-    } else {
-faceSelection.setSelectionByNormal(null);
-}
+		syncFaceSelection();
 };
 
 let faceSelection: ReturnType<typeof setupFaceSelection>;
 
 const selectionMarquee = createSelectionMarquee(container, {
-onSelection: (rect) => {
-updateSelections(rect);
-},
+	onSelection: (rect, event) => {
+		updateSelections(rect, { additive: event.shiftKey });
+	},
 });
+
+	const selectionRaycaster = new THREE.Raycaster();
+	const selectionPointer = new THREE.Vector2();
+
+	const updateSelectionPointer = (event: PointerEvent) => {
+		const rect = cameraScene.canvas.getBoundingClientRect();
+		selectionPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+		selectionPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+	};
+
+	const findSelectableRoot = (obj: THREE.Object3D) => {
+		let current: THREE.Object3D | null = obj;
+		while (current && current !== scene) {
+			if (isSelectableRoot(current)) return current;
+			current = current.parent;
+		}
+		return null;
+	};
+
+	const clearSelection = () => {
+		selectedObjects.forEach((obj) => setObjectSelection(obj, false));
+		selectedObjects.clear();
+		syncFaceSelection();
+	};
+
+	const selectSingleObject = (object: THREE.Object3D) => {
+		Array.from(selectedObjects).forEach((obj) => {
+			if (obj === object) return;
+			setObjectSelection(obj, false);
+			selectedObjects.delete(obj);
+		});
+		if (!selectedObjects.has(object)) {
+			setObjectSelection(object, true);
+			selectedObjects.add(object);
+		}
+		syncFaceSelection();
+	};
+
+	const toggleObjectSelection = (object: THREE.Object3D) => {
+		if (selectedObjects.has(object)) {
+			setObjectSelection(object, false);
+			selectedObjects.delete(object);
+		} else {
+			setObjectSelection(object, true);
+			selectedObjects.add(object);
+		}
+		syncFaceSelection();
+	};
+
+	const onCanvasPointerUp = (event: PointerEvent) => {
+		if (currentDockTool !== "select") return;
+		if (event.button !== 0) return;
+		if (selectionMarquee.isDragging()) return;
+
+		updateSelectionPointer(event);
+		selectionRaycaster.setFromCamera(selectionPointer, cameraScene.camera.three);
+		const hits = selectionRaycaster.intersectObjects(getSelectableRoots(), true);
+		const root = hits[0] ? findSelectableRoot(hits[0].object) : null;
+
+		if (!root) {
+			if (!event.shiftKey) clearSelection();
+			return;
+		}
+
+		if (event.shiftKey) toggleObjectSelection(root);
+		else selectSingleObject(root);
+	};
+
+	cameraScene.canvas.addEventListener("pointerup", onCanvasPointerUp);
 
 setupGrid(cameraScene, { yOffset: -0.5 });
 
@@ -175,15 +262,16 @@ const faceMaterials = Array.from(
 { length: 6 },
 () => new THREE.MeshBasicMaterial({ color: faceBaseColor })
 );
-const cube = new THREE.Mesh(cubeGeometry, faceMaterials);
-scene.add(cube);
-selectableObjects.push(cube);
+ const cube = new THREE.Mesh(cubeGeometry, faceMaterials);
+ cube.userData.selectable = true;
+ scene.add(cube);
 
-const edge = new THREE.EdgesGeometry(cubeGeometry);
-const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
-const outline = new THREE.LineSegments(edge, outlineMaterial);
-outline.scale.setScalar(1.0);
-cube.add(outline);
+ const edge = new THREE.EdgesGeometry(cubeGeometry);
+ const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+ const outline = new THREE.LineSegments(edge, outlineMaterial);
+ outline.userData.selectable = false;
+ outline.scale.setScalar(1.0);
+ cube.add(outline);
 
 faceSelection = setupFaceSelection({
 	cube,
@@ -209,8 +297,7 @@ const lineTool = new LineTool(
 	container,
 	snapManager,
 	(newMesh) => {
-		// Callback saat mesh terbentuk
-		selectableObjects.push(newMesh);
+		newMesh.userData.selectable = true;
 		// Opsional: tambahkan edges helper agar terlihat jelas
 		// const edges = new THREE.LineSegments(new THREE.EdgesGeometry(newMesh.geometry), new THREE.LineBasicMaterial({ color: 0x000000 }));
 		// newMesh.add(edges);
