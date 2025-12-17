@@ -8,6 +8,7 @@ import { setupLeftSidebar } from "../components/ui/LeftSidebar";
 import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
+import { SectionManager } from "../components/sections/SectionManager";
 
 const isProjectionMode = (value: string): value is CameraProjectionMode =>
   value === "Perspective" || value === "Orthographic";
@@ -16,7 +17,7 @@ const isNavigationMode = (value: string): value is NavigationModeOption =>
   value === "Orbit" || value === "Plan";
 
 async function main() {
-  setupLeftSidebar();
+  const sidebar = setupLeftSidebar();
   const container = document.getElementById("threejs");
   if (!container) throw new Error("Container element #threejs tidak ditemukan");
 
@@ -24,7 +25,20 @@ async function main() {
     background: 0x000000,
     lookAt: { position: [0, 0, 5], target: [0, 0, 0] },
   });
+  cameraScene.renderer.localClippingEnabled = true;
   setupNavigationInputBindings(cameraScene);
+  let dockHandle: Awaited<ReturnType<typeof setupDock>> | null = null;
+  const sectionManager = new SectionManager(cameraScene, sidebar, {
+    onSectionActivated: () => {
+      cameraScene.setProjection("Orthographic");
+      cameraScene.setNavigationMode("Plan");
+      if (dockHandle) {
+        dockHandle.setActiveTool("section", { silent: true });
+      }
+      currentDockTool = "section";
+      updateSelectionState("section");
+    },
+  });
 
   cameraScene.canvas.classList.add("three-main-canvas");
   const scene = cameraScene.scene;
@@ -53,7 +67,11 @@ async function main() {
 
   const selectableObjects: THREE.Object3D[] = [];
   const selectedObjects = new Set<THREE.Object3D>();
-  const selectionColor = new THREE.Color(0x4f8cff);
+  const selectionColor = new THREE.Color(0xcad6ff);
+  const tempCameraPosition = new THREE.Vector3();
+  const tempObjectPosition = new THREE.Vector3();
+  const tempDirection = new THREE.Vector3();
+  const selectionNormal = new THREE.Vector3();
 
   const setObjectSelection = (object: THREE.Object3D, selected: boolean) => {
     object.traverse((child) => {
@@ -131,6 +149,25 @@ async function main() {
     return selected;
   };
 
+  const computeFacingNormal = (object: THREE.Object3D) => {
+    tempObjectPosition.set(0, 0, 0);
+    object.getWorldPosition(tempObjectPosition);
+    cameraScene.camera.three.getWorldPosition(tempCameraPosition);
+    tempDirection.copy(tempCameraPosition).sub(tempObjectPosition);
+    const absX = Math.abs(tempDirection.x);
+    const absY = Math.abs(tempDirection.y);
+    const absZ = Math.abs(tempDirection.z);
+
+    if (absX >= absY && absX >= absZ) {
+      selectionNormal.set(Math.sign(tempDirection.x) || 1, 0, 0);
+    } else if (absY >= absX && absY >= absZ) {
+      selectionNormal.set(0, Math.sign(tempDirection.y) || 1, 0);
+    } else {
+      selectionNormal.set(0, 0, Math.sign(tempDirection.z) || 1);
+    }
+    return selectionNormal;
+  };
+
   const updateSelections = (rect: SelectionRect) => {
     const newlySelected = selectObjectsInRect(rect);
     const previous = Array.from(selectedObjects);
@@ -149,8 +186,11 @@ async function main() {
     });
 
     if (selectedObjects.size > 0) {
-      faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
-    } else {
+      const first = selectedObjects.values().next().value as THREE.Object3D | undefined;
+      if (first && faceSelection) {
+        faceSelection.setSelectionByNormal(computeFacingNormal(first), true);
+      }
+    } else if (faceSelection) {
       faceSelection.setSelectionByNormal(null);
     }
   };
@@ -175,6 +215,7 @@ async function main() {
   const cube = new THREE.Mesh(cubeGeometry, faceMaterials);
   scene.add(cube);
   selectableObjects.push(cube);
+  sectionManager.setBoundsFromObjects(selectableObjects);
 
   const edge = new THREE.EdgesGeometry(cubeGeometry);
   const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
@@ -208,6 +249,18 @@ async function main() {
   const navigationSelect = document.getElementById(
     "navigationMode"
   ) as HTMLSelectElement | null;
+  const sectionNameInput = document.getElementById(
+    "sectionName"
+  ) as HTMLInputElement | null;
+  const sectionHeightInput = document.getElementById(
+    "sectionHeightInput"
+  ) as HTMLInputElement | null;
+  const sectionAddBtn = document.getElementById(
+    "sectionAddBtn"
+  ) as HTMLButtonElement | null;
+  const sectionBoxToggle = document.getElementById(
+    "sectionBoxToggle"
+  ) as HTMLInputElement | null;
 
   if (projectionSelect) {
     projectionSelect.value = cameraScene.getProjection();
@@ -231,40 +284,69 @@ async function main() {
   });
 
   if (navigationSelect) {
-    const updateNavigationSelect = (mode: string) => {
-      if (isNavigationMode(mode)) {
-        navigationSelect.value = mode;
-      }
-    };
-
-    navigationSelect.addEventListener("change", () => {
+    navigationSelect.addEventListener("change", async () => {
       if (!isNavigationMode(navigationSelect.value)) return;
-      cameraScene.setNavigationMode(navigationSelect.value);
+      const next = navigationSelect.value;
+      if (next === "Plan") {
+        await cameraScene.setProjection("Orthographic");
+      }
+      await cameraScene.setNavigationMode(next);
     });
 
     cameraScene.onNavigationModeChanged((mode) => {
-      updateNavigationSelect(mode);
+      navigationSelect.value = mode;
     });
   }
+  sectionHeightInput?.addEventListener("input", () => {
+    const height = parseFloat(sectionHeightInput.value) || 0;
+    sectionManager.setPreviewHeight(height);
+  });
+
+  sectionAddBtn?.addEventListener("click", () => {
+    const label =
+      sectionNameInput?.value.trim() || `Section ${sectionManager.getSectionCount() + 1}`;
+    const height = parseFloat(sectionHeightInput?.value || "0");
+    sectionManager.createSection(label, height);
+  });
+
+  sectionBoxToggle?.addEventListener("change", () => {
+    sectionManager.setGizmoVisible(sectionBoxToggle.checked);
+  });
+
+  sidebar.onSectionAdd(() => {
+    sectionAddBtn?.click();
+  });
+
+  if (sectionHeightInput) {
+    sectionManager.setPreviewHeight(parseFloat(sectionHeightInput.value) || 0);
+  }
+  sectionManager.setGizmoVisible(sectionBoxToggle?.checked ?? true);
 
   let currentDockTool: DockToolId = "select";
   const updateSelectionState = (tool: DockToolId) => {
     if (tool === "select") {
       selectionMarquee.enable();
-      if (selectedObjects.size > 0) {
-        faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
+      sectionManager.handleToolActive(false);
+      if (selectedObjects.size > 0 && faceSelection) {
+        const first = selectedObjects.values().next().value as THREE.Object3D | undefined;
+        if (first) faceSelection.setSelectionByNormal(computeFacingNormal(first), true);
       }
+    } else if (tool === "section") {
+      selectionMarquee.disable();
+      faceSelection?.setSelectionByNormal(null);
+      sectionManager.handleToolActive(true);
     } else {
       selectionMarquee.disable();
-      faceSelection.setSelectionByNormal(null);
+      faceSelection?.setSelectionByNormal(null);
+      sectionManager.handleToolActive(false);
     }
   };
 
-  const dock = await setupDock({
+  dockHandle = await setupDock({
     initialTool: "select",
     onToolChange: (tool) => {
       currentDockTool = tool;
-      if (tool === "hand") {
+      if (tool === "hand" || tool === "section") {
         cameraScene.setNavigationMode("Plan");
       } else if (tool === "select") {
         cameraScene.setNavigationMode("Orbit");
@@ -276,13 +358,13 @@ async function main() {
   updateSelectionState("select");
 
   cameraScene.onNavigationModeChanged((mode) => {
-    if (mode === "Plan" && currentDockTool !== "hand") {
+    if (mode === "Plan" && currentDockTool === "select") {
       currentDockTool = "hand";
-      dock.setActiveTool("hand", { silent: true });
+      dockHandle?.setActiveTool("hand", { silent: true });
       updateSelectionState("hand");
     } else if (mode !== "Plan" && currentDockTool === "hand") {
       currentDockTool = "select";
-      dock.setActiveTool("select", { silent: true });
+      dockHandle?.setActiveTool("select", { silent: true });
       updateSelectionState("select");
     }
   });

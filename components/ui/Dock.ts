@@ -7,6 +7,7 @@ type DockButton = {
 const buttons: DockButton[] = [
   { id: "select", label: "Select", icon: "NavigationArrow" },
   { id: "hand", label: "Hand (Plan)", icon: "BackHand" },
+  { id: "section", label: "Section", icon: "Section" },
   { id: "bezier", label: "Bezier", icon: "BezierCurve" },
   { id: "circle", label: "Circle", icon: "Circle" },
   { id: "rect", label: "Rectangle", icon: "Rectangle" },
@@ -16,7 +17,17 @@ const buttons: DockButton[] = [
   { id: "chat", label: "Chat", icon: "ChatCircle" },
 ];
 
-export type DockToolId = "select" | "hand" | "bezier" | "circle" | "rect" | "oct" | "move" | "orbitTool" | "chat";
+export type DockToolId =
+  | "select"
+  | "hand"
+  | "section"
+  | "bezier"
+  | "circle"
+  | "rect"
+  | "oct"
+  | "move"
+  | "orbitTool"
+  | "chat";
 
 export type DockOptions = {
   container?: HTMLElement;

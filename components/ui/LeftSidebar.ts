@@ -17,42 +17,49 @@ const ICONS: Record<IconName, string> = {
   </svg>`,
 };
 
-type SidebarItem = {
+export type SidebarSectionItem = {
+  id: string;
   label: string;
   icon: "eye" | "grid";
+  active?: boolean;
+  onSelect?: () => void;
+};
+
+export type LeftSidebarHandle = {
+  setSectionItems: (items: SidebarSectionItem[]) => void;
+  onSectionAdd: (handler: () => void) => void;
 };
 
 type SidebarSection = {
+  id: string;
   title: string;
   subtitle?: string;
-  items: SidebarItem[];
+  items: SidebarSectionItem[];
   collapsed?: boolean;
 };
 
 const sections: SidebarSection[] = [
   {
+    id: "views",
     title: "3D Views",
-    items: [{ label: "Default", icon: "eye" }],
+    items: [{ id: "default", label: "Default", icon: "eye" }],
   },
   {
+    id: "elevations",
     title: "Elevations",
     subtitle: "(Building Elevation)",
     items: [
-      { label: "North", icon: "eye" },
-      { label: "South", icon: "eye" },
-      { label: "West", icon: "eye" },
-      { label: "East", icon: "eye" },
+      { id: "north", label: "North", icon: "eye" },
+      { id: "south", label: "South", icon: "eye" },
+      { id: "west", label: "West", icon: "eye" },
+      { id: "east", label: "East", icon: "eye" },
     ],
   },
   {
+    id: "sections",
     title: "Section",
-    subtitle: "(Building Elevation)",
-    items: [
-      { label: "Section 1", icon: "grid" },
-      { label: "North", icon: "grid" },
-      { label: "South", icon: "grid" },
-      { label: "West", icon: "grid" },
-    ],
+    subtitle: "(Plans)",
+    items: [],
   },
 ];
 
@@ -74,15 +81,19 @@ function createIconElement(name: IconName): HTMLElement {
   return span;
 }
 
-export function setupLeftSidebar(root?: HTMLElement) {
+export function setupLeftSidebar(root?: HTMLElement): LeftSidebarHandle {
   const container = ensureContainer(root);
   container.innerHTML = "";
   container.setAttribute("role", "navigation");
   container.setAttribute("aria-label", "Project views");
 
+  let sectionListRef: HTMLUListElement | null = null;
+  let sectionAddButton: HTMLButtonElement | null = null;
+
   sections.forEach((section) => {
     const sectionEl = document.createElement("section");
     sectionEl.className = "sidebar-section";
+    sectionEl.dataset.sectionId = section.id;
     if (section.collapsed) sectionEl.classList.add("collapsed");
 
     const headerRow = document.createElement("div");
@@ -121,23 +132,39 @@ export function setupLeftSidebar(root?: HTMLElement) {
 
     const list = document.createElement("ul");
     list.className = "sidebar-items";
-    section.items.forEach((item) => {
-      const li = document.createElement("li");
-      li.className = "sidebar-item";
+    const renderItems = (items: SidebarSectionItem[]) => {
+      list.innerHTML = "";
+      items.forEach((item) => {
+        const li = document.createElement("li");
+        li.className = "sidebar-item";
 
-      const itemBtn = document.createElement("button");
-      itemBtn.type = "button";
-      itemBtn.className = "sidebar-item-button";
-      itemBtn.appendChild(createIconElement(item.icon));
+        const itemBtn = document.createElement("button");
+        itemBtn.type = "button";
+        itemBtn.className = "sidebar-item-button";
+        if (item.active) itemBtn.classList.add("active");
+        itemBtn.appendChild(createIconElement(item.icon));
 
-      const label = document.createElement("span");
-      label.className = "sidebar-item-label";
-      label.textContent = item.label;
-      itemBtn.appendChild(label);
+        const label = document.createElement("span");
+        label.className = "sidebar-item-label";
+        label.textContent = item.label;
+        itemBtn.appendChild(label);
 
-      li.appendChild(itemBtn);
-      list.appendChild(li);
-    });
+        if (item.onSelect) {
+          itemBtn.addEventListener("click", () => item.onSelect?.());
+        }
+
+        li.appendChild(itemBtn);
+        list.appendChild(li);
+      });
+    };
+
+    renderItems(section.items);
+
+    if (section.id === "sections") {
+      sectionListRef = list;
+      sectionAddButton = addButton;
+    }
+
     sectionEl.appendChild(list);
 
     toggleButton.addEventListener("click", () => {
@@ -145,11 +172,42 @@ export function setupLeftSidebar(root?: HTMLElement) {
       toggleButton.setAttribute("aria-expanded", String(!collapsed));
     });
 
-    addButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      // Placeholder for future add action
-    });
-
     container.appendChild(sectionEl);
   });
+
+  return {
+    setSectionItems: (items) => {
+      const listEl = sectionListRef;
+      if (!listEl) return;
+      listEl.innerHTML = "";
+      items.forEach((item) => {
+        const li = document.createElement("li");
+        li.className = "sidebar-item";
+
+        const itemBtn = document.createElement("button");
+        itemBtn.type = "button";
+        itemBtn.className = "sidebar-item-button";
+        itemBtn.appendChild(createIconElement(item.icon));
+        if (item.active) itemBtn.classList.add("active");
+
+        const label = document.createElement("span");
+        label.className = "sidebar-item-label";
+        label.textContent = item.label;
+        itemBtn.appendChild(label);
+
+        if (item.onSelect) {
+          itemBtn.addEventListener("click", () => item.onSelect?.());
+        }
+
+        li.appendChild(itemBtn);
+        listEl.appendChild(li);
+      });
+    },
+    onSectionAdd: (handler) => {
+      sectionAddButton?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        handler();
+      });
+    },
+  };
 }
