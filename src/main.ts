@@ -11,6 +11,7 @@ import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
 import { LineTool } from "../components/Line";
 import { SnapManager } from "../components/utils/line/snap";
+import { MoveTool } from "../components/Move";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -68,17 +69,19 @@ const init = async () => {
 		cameraScene.scene,
 		cameraScene.camera.three,
 		container,
-		snapManager,
-		(newMesh) => {
-			newMesh.userData.selectable = true;
-		}
+		snapManager
+	);
+	const moveTool = new MoveTool(
+		cameraScene.scene,
+		cameraScene.camera.three,
+		container
 	);
 
 	// 8. Setup UI Bindings
 	setupUIBindings(cameraScene);
 
 	// 9. Setup Dock & Tool State Management
-	await setupDockSystem(cameraScene, lineTool, selectionSystem, faceSelection);
+	await setupDockSystem(cameraScene, lineTool, moveTool, selectionSystem, faceSelection);
 };
 
 // --- Helper Functions ---
@@ -371,23 +374,28 @@ const setupUIBindings = (cameraScene: any) => {
 const setupDockSystem = async (
 	cameraScene: any,
 	lineTool: LineTool,
+	moveTool: MoveTool,
 	selectionSystem: any,
 	faceSelection: any
 ) => {
 	const updateSelectionState = (tool: DockToolId) => {
 		selectionSystem.currentTool = tool;
 
+		// Reset all tools first
+		lineTool.disable();
+		moveTool.disable();
+		selectionSystem.selectionMarquee.disable();
+		faceSelection.setSelectionByNormal(null);
+
 		if (tool === "select") {
-			lineTool.disable();
 			selectionSystem.selectionMarquee.enable();
 			if (selectionSystem.selectedObjects.size > 0) {
 				faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
 			}
-		} else {
-			selectionSystem.selectionMarquee.disable();
-			lineTool.disable();
-			faceSelection.setSelectionByNormal(null);
-			if (tool === "line") lineTool.enable();
+		} else if (tool === "line") {
+			lineTool.enable();
+		} else if (tool === "move") {
+			moveTool.enable();
 		}
 	};
 
@@ -400,6 +408,8 @@ const setupDockSystem = async (
 				cameraScene.setNavigationMode("Orbit");
 			} else if (tool === "line") {
 				// cameraScene.setNavigationMode("Plan");
+			} else if (tool === "move") {
+				cameraScene.setNavigationMode("Orbit");
 			}
 			updateSelectionState(tool);
 		},
