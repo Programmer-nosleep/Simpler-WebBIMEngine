@@ -5,6 +5,7 @@ import { setupFaceSelection } from "../components/FaceSelection";
 import { AxesGizmo } from "../components/Gizmo";
 import { type CameraProjectionMode, createCameraScene } from "../components/CameraScene";
 import { setupGrid } from "../components/Grid";
+import { AxesWorld } from "../utils/axesWorld";
 import { setupLeftSidebar } from "../components/ui/LeftSidebar";
 import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
@@ -114,6 +115,11 @@ const setupGizmo = (container: HTMLElement, cameraScene: any) => {
 
 const setupEnvironment = (cameraScene: any) => {
 	setupGrid(cameraScene, { yOffset: -0.5 });
+
+	// Axes World Setup
+	const axesWorld = new AxesWorld();
+	axesWorld.position.y = -0.5;
+	cameraScene.scene.add(axesWorld);
 
 	// SkyDome Setup
 	const skyHelper = new SkyDomeHelper(cameraScene.scene);

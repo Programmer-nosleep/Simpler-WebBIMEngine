@@ -44,22 +44,22 @@ export class SnappingHelper {
 
     // Helper: Check points
     const checkPoints = (pts: THREE.Vector3[]) => {
-        for (let i = 0; i < pts.length; i++) {
-            const p = pts[i];
-            const d = hit.distanceTo(p);
-            if (d < this.snapThreshold) {
-                consider({ kind: "endpoint", point: p, dist: d });
-            }
+      for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          const d = hit.distanceTo(p);
+          if (d < this.snapThreshold) {
+              consider({ kind: "endpoint", point: p, dist: d });
+          }
 
-            // Midpoint
-            if (i < pts.length - 1) {
-                const mid = new THREE.Vector3().addVectors(pts[i], pts[i+1]).multiplyScalar(0.5);
-                const dMid = hit.distanceTo(mid);
-                if (dMid < this.snapThreshold) {
-                    consider({ kind: "midpoint", point: mid, dist: dMid });
-                }
-            }
-        }
+          // Midpoint
+          if (i < pts.length - 1) {
+              const mid = new THREE.Vector3().addVectors(pts[i], pts[i+1]).multiplyScalar(0.5);
+              const dMid = hit.distanceTo(mid);
+              if (dMid < this.snapThreshold) {
+                  consider({ kind: "midpoint", point: mid, dist: dMid });
+              }
+          }
+      }
     };
 
     // 1. Check current drawing points
