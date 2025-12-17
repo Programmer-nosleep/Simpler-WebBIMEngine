@@ -41,6 +41,7 @@ export class LineTool {
   // Constants
   private readonly SNAP_THRESHOLD = 0.3;
   private readonly AXIS_SNAP_PIXELS = 15;
+  private readonly SURFACE_OFFSET = 0.001;
 
   constructor(
     scene: THREE.Scene,
@@ -222,6 +223,8 @@ export class LineTool {
     }
 
     this.points.push(target);
+    // Keep the active plane passing through the latest point (SketchUp-like).
+    this.plane.constant = -this.plane.normal.dot(target);
     this.updateAnchorSprite(target);
 
     if (this.points.length === 1) {
@@ -394,6 +397,7 @@ export class LineTool {
     const mesh = new THREE.Mesh(geometry, material);
     const basis = new THREE.Matrix4().makeBasis(u, v, normal).setPosition(origin);
     mesh.applyMatrix4(basis);
+    mesh.position.addScaledVector(normal, this.SURFACE_OFFSET);
 
     const edges = new THREE.EdgesGeometry(geometry);
     const outline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
@@ -549,6 +553,16 @@ export class LineTool {
       const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
       const material = new THREE.LineBasicMaterial({ color: 0x000000 });
       object = new THREE.Line(geometry, material);
+    }
+
+    if ((object as any).isLine) {
+      const planarEps = 1e-3;
+      const isPlanarToActivePlane = this.points.every(
+        (p) => Math.abs(this.plane.distanceToPoint(p)) < planarEps
+      );
+      if (isPlanarToActivePlane) {
+        object.position.addScaledVector(this.plane.normal, this.SURFACE_OFFSET);
+      }
     }
 
     object.userData.selectable = true;
