@@ -97,7 +97,7 @@ export class SkyDomeHelper {
 export class SkyDomeUI {
   private container: HTMLDivElement;
   private helper: SkyDomeHelper;
-  private timeLabel: HTMLSpanElement;
+  private timeLabel!: HTMLSpanElement;
 
   constructor(helper: SkyDomeHelper) {
     this.helper = helper;

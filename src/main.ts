@@ -11,7 +11,6 @@ import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
 import { LineTool } from "../components/Line";
-import { SnapManager } from "../components/utils/line/snap";
 import { MoveTool } from "../components/Move";
 
 type NavigationModeOption = "Orbit" | "Plan";
@@ -65,12 +64,10 @@ const init = async () => {
 	const selectionSystem = setupSelectionSystem(container, cameraScene, faceSelection);
 
 	// 7. Setup Tools (Line, Snap)
-	const snapManager = new SnapManager();
 	const lineTool = new LineTool(
 		cameraScene.scene,
 		cameraScene.camera.three,
-		container,
-		snapManager
+		container
 	);
 	const moveTool = new MoveTool(
 		cameraScene.scene,

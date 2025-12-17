@@ -165,6 +165,7 @@ export class MoveTool {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    void e;
     if (this.isDragging) {
       this.finishMove();
     }

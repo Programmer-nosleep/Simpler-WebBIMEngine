@@ -107,7 +107,7 @@ export class SnappingHelper {
     const x = (pScreen.x * 0.5 + 0.5) * rect.width;
     const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
     
-    const distPixels = Math.sqrt(Math.pow(x - (mouseScreen.x + rect.left), 2) + Math.pow(y - (mouseScreen.y + rect.top), 2));
+    const distPixels = Math.hypot(x - mouseScreen.x, y - mouseScreen.y);
 
     return { point: pointOnAxis, distPixels };
   }

@@ -1,20 +1,26 @@
 // c:\Users\Ahmad Zani Syechkar\Documents\project\website\jsts\Three.js\my-three3d\src\components\Line.ts
 
 import * as THREE from "three";
-import { SnappingHelper } from "../helpers/snapping-helper";
+import { SnappingHelper, type SnapKind } from "../helpers/snapping-helper";
 
+type PickInfo = {
+  point: THREE.Vector3;
+  surfacePlane?: THREE.Plane;
+};
 
 export class LineTool {
   private scene: THREE.Scene;
   private camera: THREE.Camera;
   private container: HTMLElement;
-  private onLineCreated: (mesh: THREE.Object3D) => void;
+  private onLineCreated?: (mesh: THREE.Object3D) => void;
 
   private enabled = false;
   private points: THREE.Vector3[] = [];
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
-  private plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // XY Plane (Z=0)
+  private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // XZ (Y=ground)
+  private plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Active drawing plane
+  private planeLocked = false;
   private snappingHelper: SnappingHelper;
 
   // Visual Helpers
@@ -29,6 +35,8 @@ export class LineTool {
   // State
   private typedLength = "";
   private tempVec3 = new THREE.Vector3();
+  private tempVec3b = new THREE.Vector3();
+  private createdFaceHashes = new Set<string>();
 
   // Constants
   private readonly SNAP_THRESHOLD = 0.3;
@@ -38,7 +46,7 @@ export class LineTool {
     scene: THREE.Scene,
     camera: THREE.Camera,
     container: HTMLElement,
-    onLineCreated: (mesh: THREE.Object3D) => void
+    onLineCreated?: (mesh: THREE.Object3D) => void
   ) {
     this.scene = scene;
     this.camera = camera;
@@ -58,6 +66,7 @@ export class LineTool {
     this.enabled = true;
     this.points = [];
     this.typedLength = "";
+    this.resetDrawingPlane();
     this.container.style.cursor = "crosshair";
 
     this.container.addEventListener("pointermove", this.onPointerMove);
@@ -116,14 +125,14 @@ export class LineTool {
     if (e.shiftKey && (e.buttons & 1) === 1) return;
     if ((e.buttons & 4) === 4) return;
 
-    const hit = this.pickPoint(e);
-    if (!hit) return;
+    const pick = this.pickPoint(e);
+    if (!pick) return;
 
-    let target = hit.clone();
+    let target = pick.point.clone();
     let snappedAxis: "x" | "y" | "z" | null = null;
 
     // 1. Snap ke Geometri (Endpoint/Midpoint)
-    const snapResult = this.snappingHelper.getBestSnap(hit, this.points);
+    const snapResult = this.snappingHelper.getBestSnap(pick.point, this.points);
     if (snapResult) {
       target.copy(snapResult.point);
     }
@@ -139,8 +148,8 @@ export class LineTool {
 
       const axes = [
         { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
+        { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) },
         { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
-        // { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) } // Uncomment jika ingin Z-axis snap
       ];
 
       let bestDist = this.AXIS_SNAP_PIXELS;
@@ -176,16 +185,20 @@ export class LineTool {
     // Cegah event bubbling agar tidak trigger orbit controls selection
     // e.stopPropagation(); 
 
-    let target: THREE.Vector3 | null = null;
-    
-    // Prioritaskan posisi dot connector yang sudah ter-snap
-    if (this.connectorDot) {
-        target = this.connectorDot.position.clone();
-    } else {
-        target = this.pickPoint(e);
+    const pick = this.pickPoint(e);
+    if (!pick) return;
+
+    if (this.points.length === 0) {
+      if (pick.surfacePlane) {
+        this.plane.copy(pick.surfacePlane);
+        this.planeLocked = true;
+      } else {
+        this.resetDrawingPlane();
+      }
     }
 
-    if (!target) return;
+    // Prioritaskan posisi dot connector yang sudah ter-snap/axis-locked
+    let target = this.connectorDot ? this.connectorDot.position.clone() : pick.point.clone();
 
     // Close loop check
     if (this.points.length >= 2) {
@@ -236,78 +249,327 @@ export class LineTool {
 
   // --- Logic Helpers ---
 
-  private pickPoint(e: PointerEvent): THREE.Vector3 | null {
+  private resetDrawingPlane() {
+    this.syncGroundPlane();
+    this.plane.copy(this.groundPlane);
+    this.planeLocked = false;
+  }
+
+  private syncGroundPlane() {
+    const groundRef =
+      this.scene.getObjectByName("Grid") ?? this.scene.getObjectByName("AxesWorld");
+    const groundY = groundRef ? groundRef.getWorldPosition(this.tempVec3).y : 0;
+    this.groundPlane.normal.set(0, 1, 0);
+    this.groundPlane.constant = -groundY;
+  }
+
+  private getMaxPickDistance() {
+    const far = (this.camera as any).far;
+    return typeof far === "number" && isFinite(far) ? far : 1e6;
+  }
+
+  private getSurfacePlane(intersection: THREE.Intersection): THREE.Plane | undefined {
+    const face = intersection.face;
+    if (!face) return undefined;
+
+    const normal = face.normal.clone();
+    normal.transformDirection(intersection.object.matrixWorld).normalize();
+    return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, intersection.point);
+  }
+
+  private pickPoint(e: PointerEvent): PickInfo | null {
     const rect = this.container.getBoundingClientRect();
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.mouse, this.camera);
+    const maxDist = this.getMaxPickDistance();
 
-    // 1. Raycast ke object scene (exclude helpers)
-    const candidates: THREE.Object3D[] = [];
+    const meshCandidates: THREE.Object3D[] = [];
+    const lineCandidates: THREE.Object3D[] = [];
     this.scene.traverse((obj) => {
-        if ((obj as any).isMesh || (obj as any).isLine) {
-            if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).userData.isHelper) return;
-            candidates.push(obj);
-        }
+      if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).userData.isHelper) return;
+      if ((obj as any).isMesh) meshCandidates.push(obj);
+      else if ((obj as any).isLine) lineCandidates.push(obj);
     });
 
-    const hits = this.raycaster.intersectObjects(candidates, true);
-    if (hits.length > 0) {
-        return hits[0].point;
-    }
+    const meshHit = this.raycaster.intersectObjects(meshCandidates, true)[0];
+    const lineHit = this.raycaster.intersectObjects(lineCandidates, true)[0];
+    const surfaceHit: THREE.Intersection | null =
+      (meshHit && meshHit.distance <= maxDist ? meshHit : null) ??
+      (lineHit && lineHit.distance <= maxDist ? lineHit : null);
 
-    // 2. Raycast ke Plane Z=0 (XY Plane)
+    let planePoint: THREE.Vector3 | null = null;
     if (this.raycaster.ray.intersectPlane(this.plane, this.tempVec3)) {
-        return this.tempVec3.clone();
+      const dist = this.raycaster.ray.origin.distanceTo(this.tempVec3);
+      if (dist <= maxDist) planePoint = this.tempVec3.clone();
     }
 
-    return null;
+    let viewPoint: THREE.Vector3 | null = null;
+    const viewRef =
+      this.points.length > 0 ? this.points[this.points.length - 1] : surfaceHit?.point ?? null;
+
+    if (viewRef) {
+      const viewNormal = this.camera.getWorldDirection(this.tempVec3b).normalize();
+      const viewPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(viewNormal, viewRef);
+      if (this.raycaster.ray.intersectPlane(viewPlane, this.tempVec3)) {
+        const dist = this.raycaster.ray.origin.distanceTo(this.tempVec3);
+        if (dist <= maxDist) viewPoint = this.tempVec3.clone();
+      }
+    }
+
+    const starting = this.points.length === 0 && !this.planeLocked;
+    let chosenPoint: THREE.Vector3 | null = null;
+    let surfacePlane: THREE.Plane | undefined;
+
+    if (starting) {
+      if (surfaceHit) {
+        chosenPoint = surfaceHit.point.clone();
+        if (surfaceHit === meshHit) surfacePlane = this.getSurfacePlane(surfaceHit);
+      } else {
+        chosenPoint = planePoint ?? viewPoint;
+      }
+    } else {
+      chosenPoint = planePoint ?? (surfaceHit ? surfaceHit.point.clone() : null) ?? viewPoint;
+    }
+
+    if (!chosenPoint) return null;
+    return { point: chosenPoint, surfacePlane };
+  }
+
+  private createFaceFromLoop(loop: THREE.Vector3[]): THREE.Mesh | null {
+    const points = loop.slice();
+    if (points.length < 3) return null;
+
+    const closeEps = 1e-5;
+    if (points[0].distanceTo(points[points.length - 1]) < closeEps) points.pop();
+
+    const cleaned: THREE.Vector3[] = [];
+    for (const p of points) {
+      const prev = cleaned[cleaned.length - 1];
+      if (prev && prev.distanceTo(p) < closeEps) continue;
+      cleaned.push(p.clone());
+    }
+    if (cleaned.length < 3) return null;
+
+    const origin = cleaned[0];
+    let normal: THREE.Vector3 | null = null;
+    for (let i = 1; i < cleaned.length - 1 && !normal; i++) {
+      const v1 = cleaned[i].clone().sub(origin);
+      for (let j = i + 1; j < cleaned.length && !normal; j++) {
+        const v2 = cleaned[j].clone().sub(origin);
+        const n = v1.clone().cross(v2);
+        if (n.lengthSq() > 1e-10) normal = n.normalize();
+      }
+    }
+    if (!normal) return null;
+
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin);
+    const planarEps = 1e-3;
+    if (!cleaned.every((p) => Math.abs(plane.distanceToPoint(p)) < planarEps)) return null;
+
+    const helperAxis =
+      Math.abs(normal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    const u = new THREE.Vector3().crossVectors(helperAxis, normal).normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    const shape = new THREE.Shape();
+    const p0 = cleaned[0].clone().sub(origin);
+    shape.moveTo(p0.dot(u), p0.dot(v));
+    for (let i = 1; i < cleaned.length; i++) {
+      const p = cleaned[i].clone().sub(origin);
+      shape.lineTo(p.dot(u), p.dot(v));
+    }
+    shape.closePath();
+
+    const geometry = new THREE.ShapeGeometry(shape);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xcccccc,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    const basis = new THREE.Matrix4().makeBasis(u, v, normal).setPosition(origin);
+    mesh.applyMatrix4(basis);
+
+    const edges = new THREE.EdgesGeometry(geometry);
+    const outline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+    outline.userData.selectable = false;
+    mesh.add(outline);
+
+    return mesh;
+  }
+
+  private tryAutoCreateFaces() {
+    const lines: THREE.Line[] = [];
+    this.scene.traverse((obj) => {
+      if (!(obj as any).isLine || (obj as any).userData?.isHelper) return;
+      if (obj.userData.selectable !== true) return;
+      lines.push(obj as THREE.Line);
+    });
+
+    if (lines.length === 0) return;
+
+    const keyEps = 1e-4;
+    const quant = (n: number) => Math.round(n / keyEps);
+    const keyOf = (v: THREE.Vector3) => `${quant(v.x)},${quant(v.y)},${quant(v.z)}`;
+
+    const vertices: THREE.Vector3[] = [];
+    const keys: string[] = [];
+    const keyToIndex = new Map<string, number>();
+    const adjacency: number[][] = [];
+    const edgeSet = new Set<string>();
+
+    const getIndex = (p: THREE.Vector3) => {
+      const k = keyOf(p);
+      const existing = keyToIndex.get(k);
+      if (existing !== undefined) return existing;
+      const index = vertices.length;
+      keyToIndex.set(k, index);
+      vertices.push(p.clone());
+      keys.push(k);
+      adjacency[index] = [];
+      return index;
+    };
+
+    const addEdge = (a: number, b: number) => {
+      if (a === b) return;
+      const min = Math.min(a, b);
+      const max = Math.max(a, b);
+      const edgeKey = `${min}|${max}`;
+      if (edgeSet.has(edgeKey)) return;
+      edgeSet.add(edgeKey);
+      adjacency[a].push(b);
+      adjacency[b].push(a);
+    };
+
+    for (const line of lines) {
+      const geom = line.geometry;
+      if (!(geom instanceof THREE.BufferGeometry)) continue;
+      const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
+      if (!pos) continue;
+
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i < pos.count; i++) {
+        pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+      }
+      for (const p of pts) p.applyMatrix4(line.matrixWorld);
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        addEdge(getIndex(pts[i]), getIndex(pts[i + 1]));
+      }
+    }
+
+    const visited = new Set<number>();
+    for (let i = 0; i < vertices.length; i++) {
+      if (visited.has(i)) continue;
+
+      const component: number[] = [];
+      const queue: number[] = [i];
+      visited.add(i);
+
+      while (queue.length) {
+        const v = queue.pop()!;
+        component.push(v);
+        for (const n of adjacency[v]) {
+          if (visited.has(n)) continue;
+          visited.add(n);
+          queue.push(n);
+        }
+      }
+
+      if (component.length < 3) continue;
+      if (!component.every((v) => adjacency[v].length === 2)) continue;
+
+      const hash = component.map((v) => keys[v]).sort().join("|");
+      if (this.createdFaceHashes.has(hash)) continue;
+
+      const start = component[0];
+      const order: number[] = [start];
+      let prev = start;
+      let curr = adjacency[start][0];
+
+      while (true) {
+        if (curr === start) break;
+        order.push(curr);
+
+        const neigh = adjacency[curr];
+        if (neigh.length !== 2) break;
+        const next = neigh[0] === prev ? neigh[1] : neigh[0];
+
+        prev = curr;
+        curr = next;
+
+        if (order.length > component.length + 1) break;
+      }
+
+      if (order.length !== component.length) continue;
+
+      const loopPoints = order.map((idx) => vertices[idx]);
+      const mesh = this.createFaceFromLoop(loopPoints);
+      if (!mesh) continue;
+
+      mesh.userData.selectable = true;
+      mesh.userData.loopHash = hash;
+      mesh.userData.entityType = "face";
+      this.scene.add(mesh);
+      this.createdFaceHashes.add(hash);
+    }
   }
 
   private finalizeLine() {
     if (this.points.length < 2) {
-        this.disable(); // Cancel if not enough points
-        return;
+      this.points = [];
+      this.typedLength = "";
+      this.cleanupVisuals();
+      this.removeInputOverlay();
+      this.hideAxisInfo();
+      this.resetDrawingPlane();
+      return;
     }
 
-    // Check for closed loop (min 3 unique points + 1 closing point = 4 points)
-    const isClosed = this.points.length > 3 && this.points[0].distanceTo(this.points[this.points.length - 1]) < 1e-5;
+    const isClosed =
+      this.points.length > 3 &&
+      this.points[0].distanceTo(this.points[this.points.length - 1]) < 1e-5;
     let object: THREE.Object3D;
 
     if (isClosed) {
-        const shape = new THREE.Shape();
-        shape.moveTo(this.points[0].x, this.points[0].y);
-        for (let i = 1; i < this.points.length - 1; i++) {
-            shape.lineTo(this.points[i].x, this.points[i].y);
-        }
-        shape.closePath();
-
-        const geometry = new THREE.ShapeGeometry(shape);
-        const material = new THREE.MeshBasicMaterial({ color: 0xcccccc, side: THREE.DoubleSide });
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.position.z = this.points[0].z;
-
-        const edges = new THREE.EdgesGeometry(geometry);
-        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
-        mesh.add(line);
+      const mesh = this.createFaceFromLoop(this.points);
+      if (mesh) {
         object = mesh;
-    } else {
+      } else {
         const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
         const material = new THREE.LineBasicMaterial({ color: 0x000000 });
         object = new THREE.Line(geometry, material);
+      }
+    } else {
+      const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
+      const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+      object = new THREE.Line(geometry, material);
     }
 
     object.userData.selectable = true;
+    object.userData.entityType = (object as any).isMesh ? "face" : "line";
     this.scene.add(object);
-    this.onLineCreated(object);
+    try {
+      this.onLineCreated?.(object);
+    } catch (error) {
+      console.error("LineTool onLineCreated callback failed:", error);
+    }
 
-    // Reset state but keep tool active
+    if ((object as any).isLine) {
+      this.tryAutoCreateFaces();
+    }
+
     this.points = [];
     this.typedLength = "";
     this.cleanupVisuals();
     this.removeInputOverlay();
     this.hideAxisInfo();
+    this.resetDrawingPlane();
   }
 
   // --- Visual Updaters ---
@@ -378,10 +640,12 @@ export class LineTool {
   }
 
   private updateAnchorSprite(pos: THREE.Vector3) {
+      void pos;
       // Optional: Mark vertices
   }
 
   private updateHoverMarkers(edge?: {a: THREE.Vector3, b: THREE.Vector3}) {
+      void edge;
       // Optional: Highlight edge being snapped to
   }
 
