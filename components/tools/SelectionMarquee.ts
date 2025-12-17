@@ -6,7 +6,10 @@ export type SelectionRect = {
 };
 
 type SelectionMarqueeOptions = {
-  onSelection?: (rect: SelectionRect) => void;
+  onSelection?: (rect: SelectionRect, event: PointerEvent) => void;
+  requireShift?: boolean;
+  dragThreshold?: number;
+  minSizePx?: number;
 };
 
 export function createSelectionMarquee(container: HTMLElement, options: SelectionMarqueeOptions = {}) {
@@ -15,9 +18,15 @@ export function createSelectionMarquee(container: HTMLElement, options: Selectio
   container.appendChild(overlay);
 
   let isEnabled = false;
+  let isPointerDown = false;
   let isDragging = false;
+  let activePointerId: number | null = null;
+  let lastDragEndAt = 0;
   let startX = 0;
   let startY = 0;
+
+  const dragThreshold = options.dragThreshold ?? 3;
+  const minSizePx = options.minSizePx ?? 2;
 
   const getRelativePosition = (event: PointerEvent) => {
     const bounds = container.getBoundingClientRect();
@@ -49,45 +58,86 @@ export function createSelectionMarquee(container: HTMLElement, options: Selectio
 
   const onPointerDown = (event: PointerEvent) => {
     if (!isEnabled || event.button !== 0) return;
-    isDragging = true;
+    if (options.requireShift && !event.shiftKey) return;
+    if (isPointerDown) return;
+    isPointerDown = true;
+    isDragging = false;
+    activePointerId = event.pointerId;
     const { x, y } = getRelativePosition(event);
     startX = x;
     startY = y;
-    updateOverlay(event);
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
+    hideOverlay();
+    window.addEventListener("pointermove", onPointerMove, { capture: true });
+    window.addEventListener("pointerup", onPointerUp, { capture: true });
   };
 
   const onPointerMove = (event: PointerEvent) => {
-    if (!isDragging) return;
+    if (!isPointerDown) return;
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+
+    const { x, y } = getRelativePosition(event);
+    const dx = x - startX;
+    const dy = y - startY;
+    if (!isDragging) {
+      if (Math.hypot(dx, dy) < dragThreshold) return;
+      isDragging = true;
+    }
+
     event.preventDefault();
+    event.stopPropagation();
     updateOverlay(event);
   };
 
   const onPointerUp = (event: PointerEvent) => {
-    if (!isDragging) return;
-    isDragging = false;
+    if (!isPointerDown) return;
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+    isPointerDown = false;
+    window.removeEventListener("pointermove", onPointerMove, { capture: true });
+    window.removeEventListener("pointerup", onPointerUp, { capture: true });
+
+    if (!isDragging) {
+      activePointerId = null;
+      hideOverlay();
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
     updateOverlay(event);
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
     const bounds = container.getBoundingClientRect();
     const left = parseFloat(overlay.style.left || "0");
     const top = parseFloat(overlay.style.top || "0");
     const width = parseFloat(overlay.style.width || "0");
     const height = parseFloat(overlay.style.height || "0");
-    if (width > 2 && height > 2) {
+    if (width > minSizePx && height > minSizePx) {
       const rect: SelectionRect = {
         left: left / bounds.width,
         right: (left + width) / bounds.width,
         top: top / bounds.height,
         bottom: (top + height) / bounds.height,
       };
-      options.onSelection?.(rect);
+      options.onSelection?.(rect, event);
     }
     hideOverlay();
+    isDragging = false;
+    activePointerId = null;
+    lastDragEndAt = performance.now();
   };
 
-  container.addEventListener("pointerdown", onPointerDown);
+  const onClickCapture = (event: MouseEvent) => {
+    if (!lastDragEndAt) return;
+    const elapsed = performance.now() - lastDragEndAt;
+    if (elapsed > 250) {
+      lastDragEndAt = 0;
+      return;
+    }
+    lastDragEndAt = 0;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  container.addEventListener("pointerdown", onPointerDown, { capture: true });
+  container.addEventListener("click", onClickCapture, { capture: true });
 
   return {
     enable() {
@@ -95,15 +145,22 @@ export function createSelectionMarquee(container: HTMLElement, options: Selectio
     },
     disable() {
       isEnabled = false;
-      if (isDragging) {
-        isDragging = false;
-        hideOverlay();
-      }
+      if (!isPointerDown && !isDragging) return;
+      isPointerDown = false;
+      isDragging = false;
+      activePointerId = null;
+      hideOverlay();
+      window.removeEventListener("pointermove", onPointerMove, { capture: true });
+      window.removeEventListener("pointerup", onPointerUp, { capture: true });
+    },
+    isDragging() {
+      return isDragging;
     },
     dispose() {
-      container.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
+      container.removeEventListener("pointerdown", onPointerDown, { capture: true });
+      container.removeEventListener("click", onClickCapture, { capture: true });
+      window.removeEventListener("pointermove", onPointerMove, { capture: true });
+      window.removeEventListener("pointerup", onPointerUp, { capture: true });
       overlay.remove();
     },
   };

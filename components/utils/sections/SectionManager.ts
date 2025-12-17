@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import type { CameraSceneApi } from "../CameraScene";
-import type { LeftSidebarHandle, SidebarSectionItem } from "../ui/LeftSidebar";
+import type { CameraSceneApi } from "../../CameraScene";
+import type { LeftSidebarHandle, SidebarSectionItem } from "../../ui/LeftSidebar";
 import { SectionGizmo } from "./SectionGizmo";
 
 type SectionRecord = {

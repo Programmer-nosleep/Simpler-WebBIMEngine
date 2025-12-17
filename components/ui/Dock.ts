@@ -9,6 +9,7 @@ const buttons: DockButton[] = [
   { id: "hand", label: "Hand (Plan)", icon: "BackHand" },
   { id: "section", label: "Section", icon: "Section" },
   { id: "bezier", label: "Bezier", icon: "BezierCurve" },
+  { id: "line", label: "Line", icon: "Line" },
   { id: "circle", label: "Circle", icon: "Circle" },
   { id: "rect", label: "Rectangle", icon: "Rectangle" },
   { id: "oct", label: "Octagon", icon: "Octagon" },
@@ -22,6 +23,7 @@ export type DockToolId =
   | "hand"
   | "section"
   | "bezier"
+  | "line"
   | "circle"
   | "rect"
   | "oct"
