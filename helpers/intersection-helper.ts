@@ -4,8 +4,8 @@ import { type SnapKind } from "./snapping-helper";
 export type IntersectionResult = {
   point: THREE.Vector3;
   axis1: "x" | "y" | "z";
-  origin1: THREE.Vector3;
   axis2: "x" | "y" | "z";
+  origin1: THREE.Vector3;
   origin2: THREE.Vector3;
   dist: number;
 };
