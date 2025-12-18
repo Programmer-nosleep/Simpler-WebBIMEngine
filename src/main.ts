@@ -64,14 +64,15 @@ const init = async () => {
 	const selectionSystem = setupSelectionSystem(container, cameraScene, faceSelection);
 
 	// 7. Setup Tools (Line, Snap)
+	const getCamera = () => cameraScene.camera.three;
 	const lineTool = new LineTool(
 		cameraScene.scene,
-		cameraScene.camera.three,
+		getCamera,
 		container
 	);
 	const moveTool = new MoveTool(
 		cameraScene.scene,
-		cameraScene.camera.three,
+		getCamera,
 		container
 	);
 

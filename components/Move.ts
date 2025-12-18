@@ -5,7 +5,7 @@ import { SnappingHelper } from "../helpers/snapping-helper";
 
 export class MoveTool {
   private scene: THREE.Scene;
-  private camera: THREE.Camera;
+  private getCamera: () => THREE.Camera;
   private container: HTMLElement;
 
   private enabled = false;
@@ -32,15 +32,15 @@ export class MoveTool {
 
   constructor(
     scene: THREE.Scene,
-    camera: THREE.Camera,
+    camera: THREE.Camera | (() => THREE.Camera),
     container: HTMLElement
   ) {
     this.scene = scene;
-    this.camera = camera;
+    this.getCamera = typeof camera === "function" ? camera : () => camera;
     this.container = container;
     this.snappingHelper = new SnappingHelper(
       this.scene,
-      this.camera,
+      this.getCamera,
       this.container,
       this.raycaster,
       this.SNAP_THRESHOLD
@@ -185,7 +185,7 @@ export class MoveTool {
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    this.raycaster.setFromCamera(this.mouse, this.camera);
+    this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
     const candidates: THREE.Object3D[] = [];
     this.scene.traverse((obj) => {
@@ -211,7 +211,7 @@ export class MoveTool {
     this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    this.raycaster.setFromCamera(this.mouse, this.camera);
+    this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
     const candidates: THREE.Object3D[] = [];
     this.scene.traverse((obj) => {
