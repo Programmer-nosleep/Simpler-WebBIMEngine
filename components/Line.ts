@@ -2,6 +2,7 @@
 
 import * as THREE from "three";
 import { SnappingHelper, type SnapKind, type SnapResult } from "../helpers/snapping-helper";
+// (patched)
 
 type PickInfo = {
   point: THREE.Vector3;
@@ -731,7 +732,7 @@ export class LineTool {
           if (!(from === startFrom && to === startTo)) continue;
 
           const area = signedArea2D(loop, coords);
-          if (area <= areaEps) continue; // ignore outer / degenerate
+          if (Math.abs(area) <= areaEps) continue; // ignore outer / degenerate
 
           const hash = loop.map((idx) => keys[idx]).sort().join("|");
           if (this.createdFaceHashes.has(hash)) continue;

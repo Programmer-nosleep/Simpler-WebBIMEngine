@@ -155,11 +155,19 @@ export class SnappingHelper {
     };
 
     const checkSegments = (pts: THREE.Vector3[], isLineSegments: boolean) => {
+      const pointOnRay = new THREE.Vector3();
+      const pointOnSegment = new THREE.Vector3();
+
       const addSegment = (a: THREE.Vector3, b: THREE.Vector3) => {
         const edge = { a, b };
         considerPoint("endpoint", a, edge);
         considerPoint("endpoint", b, edge);
         considerPoint("midpoint", a.clone().add(b).multiplyScalar(0.5), edge);
+
+        // "On edge" inference (closest point on segment to the current ray).
+        // Requires `this.raycaster` to already be set up by the caller.
+        this.raycaster.ray.distanceSqToSegment(a, b, pointOnRay, pointOnSegment);
+        considerPoint("onEdge", pointOnSegment, edge);
       };
 
       if (pts.length < 2) return;
