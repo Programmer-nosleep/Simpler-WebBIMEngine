@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { SnappingHelper, type SnapKind, type SnapResult } from "../helpers/snapping-helper";
+import { IntersectionHelper } from "../helpers/intersection-helper";
 
 type PickInfo = {
   point: THREE.Vector3;
@@ -20,6 +21,7 @@ export class LineTool {
   private plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Active drawing plane
   private planeLocked = false;
   private snappingHelper: SnappingHelper;
+  private intersectionHelper: IntersectionHelper;
 
   // Visual Helpers
   private previewLine: THREE.Line | null = null;
@@ -59,6 +61,10 @@ export class LineTool {
       this.container,
       this.raycaster,
       this.SNAP_THRESHOLD
+    );
+    this.intersectionHelper = new IntersectionHelper(
+      this.getCamera,
+      this.container
     );
   }
 
@@ -168,18 +174,22 @@ export class LineTool {
       const start = this.points[0];
 
       // Dual Axis Snap (Intersection)
-      // Only if we have at least 2 points (drawing the 3rd or more) to form a meaningful close/alignment
+      // Check references from all previous points
       let dualSnap: THREE.Vector3 | null = null;
       if (this.points.length >= 2) {
-        const dual = this.getDualAxisSnap(last, start, mouseScreen);
-        if (dual) {
-          dualSnap = dual.point;
-          target.copy(dual.point);
+        const result = this.intersectionHelper.getBestIntersection(
+          last,
+          this.points,
+          mouseScreen,
+          this.AXIS_SNAP_PIXELS
+        );
+        if (result) {
+          dualSnap = result.point;
+          target.copy(result.point);
           axisSnapLines = [
-            { axis: dual.axis1, origin: last },
-            { axis: dual.axis2, origin: start }
+            { axis: result.axis1, origin: result.origin1 },
+            { axis: result.axis2, origin: result.origin2 },
           ];
-          // Prioritize dual snap over single snap
           snappedAxis = null;
         }
       }
@@ -972,84 +982,6 @@ export class LineTool {
   }
 
   // (Original updateAxisGuide removed/commented out)
-
-  private getDualAxisSnap(
-    p1: THREE.Vector3,
-    p2: THREE.Vector3,
-    mouseScreen: THREE.Vector2
-  ): { point: THREE.Vector3, axis1: "x" | "y" | "z", axis2: "x" | "y" | "z", dist: number } | null {
-    const axes = [
-      { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
-      { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
-      { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) },
-    ];
-
-    let bestIntersection: { point: THREE.Vector3, axis1: "x" | "y" | "z", axis2: "x" | "y" | "z", dist: number } | null = null;
-    const SNAP_DIST = this.AXIS_SNAP_PIXELS;
-
-    // Check intersections between axes from p1 and axes from p2
-    for (const ax1 of axes) {
-      for (const ax2 of axes) {
-        // Skip parallel axes (cross product ~0)
-        if (Math.abs(ax1.dir.dot(ax2.dir)) > 0.99) continue;
-
-        // Find closest points on two skew lines
-        // Line 1: p1 + s * ax1.dir
-        // Line 2: p2 + t * ax2.dir
-        // Vector w0 = p1 - p2
-        // a = d1.d1 = 1, b = d1.d2 = 0 (if orthogonal), c = d2.d2 = 1
-        // d = d1.w0, e = d2.w0
-        // In our case axes are usually orthogonal (dot=0), so b=0.
-        // denom = a*c - b*b = 1.
-
-        const w0 = new THREE.Vector3().subVectors(p1, p2);
-        const a = 1;
-        const b = ax1.dir.dot(ax2.dir);
-        const c = 1;
-        const d = ax1.dir.dot(w0);
-        const e = ax2.dir.dot(w0);
-        const denom = a * c - b * b;
-
-        if (denom < 1e-6) continue;
-
-        const sc = (b * e - c * d) / denom;
-        const tc = (a * e - b * d) / denom;
-
-        const intersect1 = p1.clone().addScaledVector(ax1.dir, sc);
-        const intersect2 = p2.clone().addScaledVector(ax2.dir, tc);
-
-        // If lines don't actually intersect (distance > epsilon), then no valid intersection point in 2D plane projection?
-        // But we are in 3D. If they are not coplanar, they don't meet.
-        // However, usually user is on a Ground Plane or similar.
-        // If P1.y = P2.y = 0, and we check X/Z axes, they intersect exactly.
-        // If we check X from P1 and Y from P2, they intersect exactly if z coords match.
-
-        // We should check distance between intersect1 and intersect2.
-        // If it's large, they are skew lines and don't meet.
-        if (intersect1.distanceTo(intersect2) > 0.1) continue;
-
-        // Candidate intersection point
-        const candidate = intersect1.clone().add(intersect2).multiplyScalar(0.5);
-
-        // Project to screen to check mouse distance
-        const camera = this.getCamera();
-        const pScreen = candidate.clone().project(camera);
-        const rect = this.container.getBoundingClientRect();
-        const x = (pScreen.x * 0.5 + 0.5) * rect.width;
-        const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
-
-        const dist = Math.hypot(x - mouseScreen.x, y - mouseScreen.y);
-
-        if (dist < SNAP_DIST) {
-          if (!bestIntersection || dist < bestIntersection.dist) {
-            bestIntersection = { point: candidate, axis1: ax1.name, axis2: ax2.name, dist };
-          }
-        }
-      }
-    }
-
-    return bestIntersection;
-  }
 
   private getEdgeLockDirsFromSnap(snap: SnapResult | null, target: THREE.Vector3) {
     if (!snap) return [];
