@@ -1,8 +1,5 @@
-// c:\Users\Ahmad Zani Syechkar\Documents\project\website\jsts\Three.js\my-three3d\src\components\Line.ts
-
 import * as THREE from "three";
 import { SnappingHelper, type SnapKind, type SnapResult } from "../helpers/snapping-helper";
-// (patched)
 
 type PickInfo = {
   point: THREE.Vector3;
@@ -27,12 +24,10 @@ export class LineTool {
   // Visual Helpers
   private previewLine: THREE.Line | null = null;
   private connectorDot: THREE.Sprite | null = null;
-  private axisGuide: THREE.Line | null = null;
+  private axisGuides: THREE.Line[] = []; // Changed from single axisGuide to array
   private snapGuides: THREE.Group | null = null;
   private snapGuideLines: THREE.Line[] = [];
   private edgeGuide: THREE.Line | null = null;
-  private anchorSprite: THREE.Sprite | null = null;
-  private hoverMarkers: THREE.Group | null = null;
   private axisInfoEl: HTMLDivElement | null = null;
   private inputEl: HTMLInputElement | null = null;
 
@@ -122,27 +117,23 @@ export class LineTool {
 
     removeObj(this.previewLine);
     removeObj(this.connectorDot);
-    removeObj(this.axisGuide);
+    this.axisGuides.forEach(g => removeObj(g));
     removeObj(this.snapGuides);
     removeObj(this.edgeGuide);
-    removeObj(this.anchorSprite);
-    removeObj(this.hoverMarkers);
 
     this.previewLine = null;
     this.connectorDot = null;
-    this.axisGuide = null;
+    this.axisGuides = [];
     this.snapGuides = null;
     this.snapGuideLines = [];
     this.edgeGuide = null;
-    this.anchorSprite = null;
-    this.hoverMarkers = null;
   }
 
   // --- Event Handlers ---
 
   private onPointerMove = (e: PointerEvent) => {
     if (!this.enabled) return;
-    
+
     // Skip jika sedang navigasi (Shift/Middle click)
     if (e.shiftKey && (e.buttons & 1) === 1) return;
     if ((e.buttons & 4) === 4) return;
@@ -170,54 +161,107 @@ export class LineTool {
     }
 
     // 2. Axis Locking (Inference)
+    let axisSnapLines: { axis: "x" | "y" | "z", origin: THREE.Vector3 }[] = [];
+
     if (!snapResult && this.points.length > 0) {
       const last = this.points[this.points.length - 1];
+      const start = this.points[0];
 
-      const axes = [
-        { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
-        { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) },
-        { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
-      ];
-
-      let bestDist = this.AXIS_SNAP_PIXELS;
-      let bestPoint: THREE.Vector3 | null = null;
-
-      for (const ax of axes) {
-        const info = this.snappingHelper.getClosestPointOnAxis(last, ax.dir, mouseScreen);
-        if (info.distPixels < bestDist) {
-          bestDist = info.distPixels;
-          bestPoint = info.point;
-          snappedAxis = ax.name;
-          snappedEdgeDir = null;
-        }
-      }
-
-      for (const dir of this.edgeLockDirs) {
-        const info = this.snappingHelper.getClosestPointOnAxis(last, dir, mouseScreen);
-        if (info.distPixels < bestDist) {
-          bestDist = info.distPixels;
-          bestPoint = info.point;
+      // Dual Axis Snap (Intersection)
+      // Only if we have at least 2 points (drawing the 3rd or more) to form a meaningful close/alignment
+      let dualSnap: THREE.Vector3 | null = null;
+      if (this.points.length >= 2) {
+        const dual = this.getDualAxisSnap(last, start, mouseScreen);
+        if (dual) {
+          dualSnap = dual.point;
+          target.copy(dual.point);
+          axisSnapLines = [
+            { axis: dual.axis1, origin: last },
+            { axis: dual.axis2, origin: start }
+          ];
+          // Prioritize dual snap over single snap
           snappedAxis = null;
-          snappedEdgeDir = dir;
         }
       }
 
-      if (bestPoint) {
-        target.copy(bestPoint);
+      // Single Axis Snap (fallback if no dual snap)
+      if (!dualSnap) {
+        const axes = [
+          { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
+          { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) },
+          { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
+        ];
+
+        let bestDist = this.AXIS_SNAP_PIXELS;
+        let bestPoint: THREE.Vector3 | null = null;
+
+        // Check alignment with LAST point
+        for (const ax of axes) {
+          const info = this.snappingHelper.getClosestPointOnAxis(last, ax.dir, mouseScreen);
+          if (info.distPixels < bestDist) {
+            bestDist = info.distPixels;
+            bestPoint = info.point;
+            snappedAxis = ax.name;
+            snappedEdgeDir = null;
+            axisSnapLines = [{ axis: ax.name, origin: last }];
+          }
+        }
+
+        // Check alignment with START point (if not aligned with last)
+        // Note: If you want to allow snapping to start point INSTEAD of last point, check here.
+        // But usually Last point has priority or we check both and take closest.
+        // For now let's prioritize Last point for single axis snap to avoid jumping too much,
+        // unless we want to treat them equally.
+        if (!bestPoint && this.points.length > 1) {
+          for (const ax of axes) {
+            const info = this.snappingHelper.getClosestPointOnAxis(start, ax.dir, mouseScreen);
+            if (info.distPixels < bestDist) {
+              bestDist = info.distPixels;
+              bestPoint = info.point;
+              snappedAxis = ax.name; // Use same visual style
+              snappedEdgeDir = null;
+              axisSnapLines = [{ axis: ax.name, origin: start }];
+            }
+          }
+        }
+
+        if (bestPoint) {
+          target.copy(bestPoint);
+        }
+      }
+
+      if (!dualSnap && !snappedAxis) {
+        // Edge Locking from Last Point (if no axis snap)
+        for (const dir of this.edgeLockDirs) {
+          const info = this.snappingHelper.getClosestPointOnAxis(last, dir, mouseScreen);
+          if (info.distPixels < this.AXIS_SNAP_PIXELS) {
+            // bestDist check omitted for simplicity but valid
+            target.copy(info.point);
+            snappedAxis = null;
+            snappedEdgeDir = dir;
+            axisSnapLines = []; // Clear axis guides if edge locked
+          }
+        }
       }
     }
 
     // Update Visuals
     this.updateConnectorDot(target, snapResult?.kind);
     this.updateSnapGuides(snapResult);
-    this.updateAxisGuide(snappedAxis, this.points[this.points.length - 1]);
+
+    // Update multiple axis guides
+    // Only show helper axis guides when doing an "intersection" snap (dual axis),
+    // to avoid noisy guide lines during normal drawing.
+    this.updateAxisGuides(axisSnapLines.length > 1 ? axisSnapLines : []);
+
     this.updateEdgeGuide(snappedEdgeDir, this.points[this.points.length - 1]);
     this.updatePreviewLine(target);
-    this.updateHoverMarkers(snapResult?.edge);
-    
+
     if (this.points.length > 0) {
-        const lockLabel = snappedAxis ?? (snappedEdgeDir ? "edge" : null);
-        this.updateAxisInfo(this.points[this.points.length - 1], target, lockLabel);
+      // Pass empty string for axis if we have a custom label like "Intersection" logic in updateAxisInfo needs adjustment?
+      // Actually updateAxisInfo takes (last, curr, axis). We can hack axis string.
+      const lockLabel = snappedAxis ? `Axis: ${snappedAxis.toUpperCase()}` : (snappedEdgeDir ? "Edge" : (axisSnapLines.length > 1 ? "Intersection" : null));
+      this.updateAxisInfo(this.points[this.points.length - 1], target, lockLabel);
     }
   };
 
@@ -254,24 +298,24 @@ export class LineTool {
 
     // Close loop check
     if (this.points.length >= 2) {
-        if (target.distanceTo(this.points[0]) < this.SNAP_THRESHOLD) {
-            this.points.push(this.points[0].clone());
-            this.finalizeLine();
-            return;
-        }
+      if (target.distanceTo(this.points[0]) < this.SNAP_THRESHOLD) {
+        this.points.push(this.points[0].clone());
+        this.finalizeLine();
+        return;
+      }
     }
 
     // Handle Typed Length
     if (this.points.length > 0 && this.typedLength) {
-        const len = parseFloat(this.typedLength);
-        if (isFinite(len) && len > 0) {
-            const last = this.points[this.points.length - 1];
-            const dir = new THREE.Vector3().subVectors(target, last).normalize();
-            target = last.clone().addScaledVector(dir, len);
-            this.typedLength = "";
-            this.removeInputOverlay();
-         }
-     }
+      const len = parseFloat(this.typedLength);
+      if (isFinite(len) && len > 0) {
+        const last = this.points[this.points.length - 1];
+        const dir = new THREE.Vector3().subVectors(target, last).normalize();
+        target = last.clone().addScaledVector(dir, len);
+        this.typedLength = "";
+        this.removeInputOverlay();
+      }
+    }
 
     const nextEdgeLockDirs = this.getEdgeLockDirsFromSnap(clickSnap, target);
 
@@ -279,10 +323,9 @@ export class LineTool {
     this.edgeLockDirs = nextEdgeLockDirs;
     // Keep the active plane passing through the latest point (SketchUp-like).
     this.plane.constant = -this.plane.normal.dot(target);
-    this.updateAnchorSprite(target);
 
     if (this.points.length === 1) {
-        this.showInputOverlay(e.clientX, e.clientY);
+      this.showInputOverlay(e.clientX, e.clientY);
     }
   };
 
@@ -290,17 +333,17 @@ export class LineTool {
     if (!this.enabled) return;
 
     if (e.key === "Enter") {
-        if (this.points.length > 1) this.finalizeLine();
+      if (this.points.length > 1) this.finalizeLine();
     } else if (e.key === "Backspace") {
-        this.typedLength = this.typedLength.slice(0, -1);
-        this.updateInputDisplay();
+      this.typedLength = this.typedLength.slice(0, -1);
+      this.updateInputDisplay();
     } else if (/^[0-9.]$/.test(e.key)) {
-        this.typedLength += e.key;
-        this.updateInputDisplay();
-        // Jika input box belum muncul (misal user mengetik tanpa klik pertama), munculkan di tengah atau dekat mouse
-        if (!this.inputEl && this.points.length > 0) {
-             // Fallback position logic could go here
-        }
+      this.typedLength += e.key;
+      this.updateInputDisplay();
+      // Jika input box belum muncul (misal user mengetik tanpa klik pertama), munculkan di tengah atau dekat mouse
+      if (!this.inputEl && this.points.length > 0) {
+        // Fallback position logic could go here
+      }
     }
   };
 
@@ -842,22 +885,22 @@ export class LineTool {
 
   private updateConnectorDot(pos: THREE.Vector3, snapKind?: SnapKind) {
     if (!this.connectorDot) {
-        const canvas = document.createElement("canvas");
-        canvas.width = 64; canvas.height = 64;
-        const ctx = canvas.getContext("2d")!;
-        ctx.beginPath(); ctx.arc(32, 32, 16, 0, Math.PI*2); ctx.fillStyle = "#fff"; ctx.fill();
-        ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.stroke();
-        
-        const tex = new THREE.CanvasTexture(canvas);
-        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
-        this.connectorDot = new THREE.Sprite(mat);
-        this.connectorDot.scale.set(0.5, 0.5, 1);
-        this.connectorDot.renderOrder = 999;
-        this.connectorDot.userData.isHelper = true;
-        this.scene.add(this.connectorDot);
+      const canvas = document.createElement("canvas");
+      canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext("2d")!;
+      ctx.beginPath(); ctx.arc(32, 32, 16, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
+      ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.stroke();
+
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+      this.connectorDot = new THREE.Sprite(mat);
+      this.connectorDot.scale.set(0.5, 0.5, 1);
+      this.connectorDot.renderOrder = 999;
+      this.connectorDot.userData.isHelper = true;
+      this.scene.add(this.connectorDot);
     }
     this.connectorDot.position.copy(pos);
-    
+
     const mat = this.connectorDot.material;
     if (snapKind === "endpoint") mat.color.setHex(0x00ff00);
     else if (snapKind === "midpoint") mat.color.setHex(0x00ffff);
@@ -866,51 +909,146 @@ export class LineTool {
 
   private updatePreviewLine(currentPos: THREE.Vector3) {
     if (this.points.length === 0) return;
-    
+
     const pts = [...this.points, currentPos];
     const geometry = new THREE.BufferGeometry().setFromPoints(pts);
-    
+
     if (!this.previewLine) {
-        const material = new THREE.LineBasicMaterial({ color: 0x000000 });
-        this.previewLine = new THREE.Line(geometry, material);
-        this.previewLine.userData.isHelper = true;
-        this.scene.add(this.previewLine);
+      const material = new THREE.LineBasicMaterial({
+        color: 0x000000,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.previewLine = new THREE.Line(geometry, material);
+      this.previewLine.userData.isHelper = true;
+      this.previewLine.renderOrder = 997;
+      this.scene.add(this.previewLine);
     } else {
-        this.previewLine.geometry.dispose();
-        this.previewLine.geometry = geometry;
+      this.previewLine.geometry.dispose();
+      this.previewLine.geometry = geometry;
     }
   }
 
-  private updateAxisGuide(axis: "x" | "y" | "z" | null, origin?: THREE.Vector3) {
-    if (!axis || !origin) {
-        if (this.axisGuide) this.axisGuide.visible = false;
-        return;
+  private updateAxisGuides(lines: { axis: "x" | "y" | "z", origin: THREE.Vector3 }[]) {
+    // Hide extra existing guides
+    for (let i = lines.length; i < this.axisGuides.length; i++) {
+      if (this.axisGuides[i]) this.axisGuides[i].visible = false;
     }
 
-    if (!this.axisGuide) {
+    // Create/Update needed guides
+    for (let i = 0; i < lines.length; i++) {
+      let guide = this.axisGuides[i];
+      if (!guide) {
         const geom = new THREE.BufferGeometry();
         const mat = new THREE.LineDashedMaterial({
-            color: 0xff0000,
-            dashSize: 0.5,
-            gapSize: 0.3,
-            depthTest: false,
-            depthWrite: false,
+          color: 0xff0000,
+          dashSize: 0.5,
+          gapSize: 0.3,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1
         });
-        this.axisGuide = new THREE.Line(geom, mat);
-        this.axisGuide.computeLineDistances(); // Required for LineDashedMaterial
-        this.axisGuide.userData.isHelper = true;
-        this.scene.add(this.axisGuide);
+        guide = new THREE.Line(geom, mat);
+        guide.userData.isHelper = true;
+        guide.renderOrder = 998;
+        this.scene.add(guide);
+        this.axisGuides[i] = guide;
+      } else if (!guide.parent) {
+        this.scene.add(guide);
+      }
+
+      const { axis, origin } = lines[i];
+      const mat = guide.material as THREE.LineDashedMaterial;
+      mat.color.setHex(axis === 'x' ? 0xff0000 : axis === 'y' ? 0x00ff00 : 0x0000ff);
+
+      const dir = axis === 'x' ? new THREE.Vector3(1, 0, 0) : axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+      const p1 = origin.clone().addScaledVector(dir, -1000);
+      const p2 = origin.clone().addScaledVector(dir, 1000);
+
+      guide.geometry.setFromPoints([p1, p2]);
+      guide.computeLineDistances();
+      guide.visible = true;
+    }
+  }
+
+  // (Original updateAxisGuide removed/commented out)
+
+  private getDualAxisSnap(
+    p1: THREE.Vector3,
+    p2: THREE.Vector3,
+    mouseScreen: THREE.Vector2
+  ): { point: THREE.Vector3, axis1: "x" | "y" | "z", axis2: "x" | "y" | "z", dist: number } | null {
+    const axes = [
+      { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
+      { name: "y" as const, dir: new THREE.Vector3(0, 1, 0) },
+      { name: "z" as const, dir: new THREE.Vector3(0, 0, 1) },
+    ];
+
+    let bestIntersection: { point: THREE.Vector3, axis1: "x" | "y" | "z", axis2: "x" | "y" | "z", dist: number } | null = null;
+    const SNAP_DIST = this.AXIS_SNAP_PIXELS;
+
+    // Check intersections between axes from p1 and axes from p2
+    for (const ax1 of axes) {
+      for (const ax2 of axes) {
+        // Skip parallel axes (cross product ~0)
+        if (Math.abs(ax1.dir.dot(ax2.dir)) > 0.99) continue;
+
+        // Find closest points on two skew lines
+        // Line 1: p1 + s * ax1.dir
+        // Line 2: p2 + t * ax2.dir
+        // Vector w0 = p1 - p2
+        // a = d1.d1 = 1, b = d1.d2 = 0 (if orthogonal), c = d2.d2 = 1
+        // d = d1.w0, e = d2.w0
+        // In our case axes are usually orthogonal (dot=0), so b=0.
+        // denom = a*c - b*b = 1.
+
+        const w0 = new THREE.Vector3().subVectors(p1, p2);
+        const a = 1;
+        const b = ax1.dir.dot(ax2.dir);
+        const c = 1;
+        const d = ax1.dir.dot(w0);
+        const e = ax2.dir.dot(w0);
+        const denom = a * c - b * b;
+
+        if (denom < 1e-6) continue;
+
+        const sc = (b * e - c * d) / denom;
+        const tc = (a * e - b * d) / denom;
+
+        const intersect1 = p1.clone().addScaledVector(ax1.dir, sc);
+        const intersect2 = p2.clone().addScaledVector(ax2.dir, tc);
+
+        // If lines don't actually intersect (distance > epsilon), then no valid intersection point in 2D plane projection?
+        // But we are in 3D. If they are not coplanar, they don't meet.
+        // However, usually user is on a Ground Plane or similar.
+        // If P1.y = P2.y = 0, and we check X/Z axes, they intersect exactly.
+        // If we check X from P1 and Y from P2, they intersect exactly if z coords match.
+
+        // We should check distance between intersect1 and intersect2.
+        // If it's large, they are skew lines and don't meet.
+        if (intersect1.distanceTo(intersect2) > 0.1) continue;
+
+        // Candidate intersection point
+        const candidate = intersect1.clone().add(intersect2).multiplyScalar(0.5);
+
+        // Project to screen to check mouse distance
+        const camera = this.getCamera();
+        const pScreen = candidate.clone().project(camera);
+        const rect = this.container.getBoundingClientRect();
+        const x = (pScreen.x * 0.5 + 0.5) * rect.width;
+        const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
+
+        const dist = Math.hypot(x - mouseScreen.x, y - mouseScreen.y);
+
+        if (dist < SNAP_DIST) {
+          if (!bestIntersection || dist < bestIntersection.dist) {
+            bestIntersection = { point: candidate, axis1: ax1.name, axis2: ax2.name, dist };
+          }
+        }
+      }
     }
 
-    this.axisGuide.visible = true;
-    const mat = this.axisGuide.material as THREE.LineDashedMaterial;
-    mat.color.setHex(axis === 'x' ? 0xff0000 : axis === 'y' ? 0x00ff00 : 0x0000ff);
-
-    const dir = axis === 'x' ? new THREE.Vector3(1,0,0) : axis === 'y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
-    const p1 = origin.clone().addScaledVector(dir, -1000);
-    const p2 = origin.clone().addScaledVector(dir, 1000);
-    this.axisGuide.geometry.setFromPoints([p1, p2]);
-    this.axisGuide.computeLineDistances();
+    return bestIntersection;
   }
 
   private getEdgeLockDirsFromSnap(snap: SnapResult | null, target: THREE.Vector3) {
@@ -1030,38 +1168,30 @@ export class LineTool {
     this.edgeGuide.visible = true;
   }
 
-  private updateAnchorSprite(pos: THREE.Vector3) {
-      void pos;
-      // Optional: Mark vertices
-  }
 
-  private updateHoverMarkers(edge?: {a: THREE.Vector3, b: THREE.Vector3}) {
-      void edge;
-      // Optional: Highlight edge being snapped to
-  }
 
   // --- UI Overlays ---
 
   private showInputOverlay(x: number, y: number) {
     if (!this.inputEl) {
-        this.inputEl = document.createElement("input");
-        this.inputEl.type = "text";
-        this.inputEl.placeholder = "Length...";
-        this.inputEl.className = "control-panel"; // Reuse style
-        Object.assign(this.inputEl.style, {
-            position: "fixed",
-            zIndex: "10000",
-            width: "100px",
-            padding: "4px 8px",
-            fontSize: "12px",
-            pointerEvents: "none", // Let user type but not click? Or focus it?
-            // Actually for SketchUp style, you just type. We display what is typed.
-            background: "rgba(255, 255, 255, 0.9)",
-            color: "black",
-            border: "1px solid #ccc",
-            borderRadius: "4px"
-        });
-        document.body.appendChild(this.inputEl);
+      this.inputEl = document.createElement("input");
+      this.inputEl.type = "text";
+      this.inputEl.placeholder = "Length...";
+      this.inputEl.className = "control-panel"; // Reuse style
+      Object.assign(this.inputEl.style, {
+        position: "fixed",
+        zIndex: "10000",
+        width: "100px",
+        padding: "4px 8px",
+        fontSize: "12px",
+        pointerEvents: "none", // Let user type but not click? Or focus it?
+        // Actually for SketchUp style, you just type. We display what is typed.
+        background: "rgba(255, 255, 255, 0.9)",
+        color: "black",
+        border: "1px solid #ccc",
+        borderRadius: "4px"
+      });
+      document.body.appendChild(this.inputEl);
     }
     this.inputEl.style.left = `${x + 15}px`;
     this.inputEl.style.top = `${y + 15}px`;
@@ -1069,52 +1199,52 @@ export class LineTool {
   }
 
   private updateInputDisplay() {
-      if (this.inputEl) {
-          this.inputEl.value = this.typedLength;
-          this.inputEl.style.display = this.points.length > 0 ? "block" : "none";
-      }
+    if (this.inputEl) {
+      this.inputEl.value = this.typedLength;
+      this.inputEl.style.display = this.points.length > 0 ? "block" : "none";
+    }
   }
 
   private removeInputOverlay() {
-      if (this.inputEl) {
-          this.inputEl.remove();
-          this.inputEl = null;
-      }
+    if (this.inputEl) {
+      this.inputEl.remove();
+      this.inputEl = null;
+    }
   }
 
   private updateAxisInfo(last: THREE.Vector3, curr: THREE.Vector3, axis: string | null) {
-      if (!this.axisInfoEl) {
-          this.axisInfoEl = document.createElement("div");
-          Object.assign(this.axisInfoEl.style, {
-              position: "fixed",
-              zIndex: "9999",
-              padding: "4px 8px",
-              fontSize: "11px",
-              borderRadius: "4px",
-              background: "rgba(0,0,0,0.7)",
-              color: "#fff",
-              pointerEvents: "none",
-              whiteSpace: "pre",
-          });
-          document.body.appendChild(this.axisInfoEl);
-      }
-      
-      const dist = last.distanceTo(curr);
-      const axisLabel = axis ? `Axis: ${axis.toUpperCase()}` : "Free";
-      this.axisInfoEl.innerText = `Len: ${dist.toFixed(2)}m\n${axisLabel}`;
-      
-      // Position near mouse
-      const rect = this.container.getBoundingClientRect();
-      const pScreen = curr.clone().project(this.getCamera());
-      const x = (pScreen.x * 0.5 + 0.5) * rect.width + rect.left;
-      const y = (-pScreen.y * 0.5 + 0.5) * rect.height + rect.top;
-      
-      this.axisInfoEl.style.left = `${x + 20}px`;
-      this.axisInfoEl.style.top = `${y + 20}px`;
-      this.axisInfoEl.style.display = "block";
+    if (!this.axisInfoEl) {
+      this.axisInfoEl = document.createElement("div");
+      Object.assign(this.axisInfoEl.style, {
+        position: "fixed",
+        zIndex: "9999",
+        padding: "4px 8px",
+        fontSize: "11px",
+        borderRadius: "4px",
+        background: "rgba(0,0,0,0.7)",
+        color: "#fff",
+        pointerEvents: "none",
+        whiteSpace: "pre",
+      });
+      document.body.appendChild(this.axisInfoEl);
+    }
+
+    const dist = last.distanceTo(curr);
+    const axisLabel = axis ?? "Free"; // Use passed label directly or fallback
+    this.axisInfoEl.innerText = `Len: ${dist.toFixed(2)}m\n${axisLabel}`;
+
+    // Position near mouse
+    const rect = this.container.getBoundingClientRect();
+    const pScreen = curr.clone().project(this.getCamera());
+    const x = (pScreen.x * 0.5 + 0.5) * rect.width + rect.left;
+    const y = (-pScreen.y * 0.5 + 0.5) * rect.height + rect.top;
+
+    this.axisInfoEl.style.left = `${x + 20}px`;
+    this.axisInfoEl.style.top = `${y + 20}px`;
+    this.axisInfoEl.style.display = "block";
   }
 
   private hideAxisInfo() {
-      if (this.axisInfoEl) this.axisInfoEl.style.display = "none";
+    if (this.axisInfoEl) this.axisInfoEl.style.display = "none";
   }
 }
