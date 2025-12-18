@@ -77,6 +77,13 @@ export class LineTool {
 
   public disable() {
     if (!this.enabled) return;
+
+    // When exiting the tool (e.g. via Escape/tool switch), don't discard the
+    // already drawn points. Commit them as a line/mesh if possible.
+    if (this.points.length > 0) {
+      this.finalizeLine();
+    }
+
     this.enabled = false;
     this.container.style.cursor = "default";
 
@@ -637,20 +644,26 @@ export class LineTool {
 
     if (!this.axisGuide) {
         const geom = new THREE.BufferGeometry();
-        const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        const mat = new THREE.LineDashedMaterial({
+            color: 0xff0000,
+            dashSize: 0.5,
+            gapSize: 0.3,
+        });
         this.axisGuide = new THREE.Line(geom, mat);
+        this.axisGuide.computeLineDistances(); // Required for LineDashedMaterial
         this.axisGuide.userData.isHelper = true;
         this.scene.add(this.axisGuide);
     }
 
     this.axisGuide.visible = true;
-    const mat = this.axisGuide.material as THREE.LineBasicMaterial;
+    const mat = this.axisGuide.material as THREE.LineDashedMaterial;
     mat.color.setHex(axis === 'x' ? 0xff0000 : axis === 'y' ? 0x00ff00 : 0x0000ff);
 
     const dir = axis === 'x' ? new THREE.Vector3(1,0,0) : axis === 'y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
     const p1 = origin.clone().addScaledVector(dir, -1000);
     const p2 = origin.clone().addScaledVector(dir, 1000);
     this.axisGuide.geometry.setFromPoints([p1, p2]);
+    this.axisGuide.computeLineDistances();
   }
 
   private updateAnchorSprite(pos: THREE.Vector3) {
