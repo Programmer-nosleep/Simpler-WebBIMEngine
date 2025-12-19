@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>my-three3d</title>
+    <title>Simpler - BIMEngine</title>
   </head>
   <body>
     <div id="threejs"></div>
@@ -47,6 +47,18 @@
             Show box
           </label>
         </div> -->
+        <div class="control-panel">
+          <label for="importerFormat">Import</label>
+          <div class="control-row">
+            <select id="importerFormat">
+              <option value="glb">GLB/GLTF</option>
+              <option value="obj">OBJ</option>
+              <option value="ifc">IFC</option>
+            </select>
+            <!-- tetap pakai id="importer" biar code kamu yang sudah ada nggak rusak -->
+            <input type="file" id="importer" />
+          </div>
+        </div>
       </div>
       <aside id="leftSidebar" aria-label="Project views sidebar"></aside>
     </div>

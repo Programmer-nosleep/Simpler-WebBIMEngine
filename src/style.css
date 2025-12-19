@@ -31,27 +31,43 @@ body,
   inset: 0;
 }
 
+/* =========================
+   UI FLOATING (TIDAK MELEBAR)
+   ========================= */
 #ui-floating {
   position: fixed;
   top: 12px;
   left: 12px;
   z-index: 12;
-  width: min(360px, calc(100vw - 24px));
+
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+
+  width: auto;
 }
 
+/* =========================
+   LEFT SIDEBAR (LEBAR SENDIRI)
+   ========================= */
 #leftSidebar {
-  flex: 1;
+  margin-top: 10px;
+  width: min(360px, calc(100vw - 24px));
+
   padding: 18px 18px 20px;
   background: rgba(0, 0, 0, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 18px;
   color: #f5f5f5;
   font-size: 13px;
+
   display: flex;
   flex-direction: column;
   gap: 18px;
+
   overflow-y: auto;
   max-height: calc(100vh - 124px);
+
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(20px);
 }
@@ -180,6 +196,9 @@ body,
   font-weight: 500;
 }
 
+/* =========================
+   CANVAS
+   ========================= */
 #threejs canvas.three-main-canvas {
   display: block;
   width: 100%;
@@ -194,25 +213,37 @@ body,
   pointer-events: auto;
 }
 
+/* =========================
+   TOP PANELS (BERJEJER)
+   ========================= */
 #ui-panels {
-  display: flex;
-  flex-wrap: wrap;
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: nowrap; /* ganti jadi wrap kalau mau turun saat sempit */
   gap: 8px;
-  align-items: stretch;
+  align-items: center;
   justify-content: flex-start;
+  width: auto;
 }
 
+/* Samain tinggi pill semua panel */
 .control-panel {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 0 10px 0 10px;
+  /* padding: 10px 14px; */
   border-radius: 12px;
   background: rgba(0, 0, 0, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(6px);
-  width: 100%;
+
+  width: auto;
+  flex: 0 0 auto;
+  min-width: 0;
+
+  min-height: 44px; /* IMPORTANT: biar timeline gak kekecilan */
 }
 
 .control-row {
@@ -221,6 +252,7 @@ body,
   align-items: center;
   justify-content: flex-start;
   flex-wrap: nowrap;
+  height: 100%;
 }
 
 .control-panel label {
@@ -229,16 +261,90 @@ body,
   white-space: nowrap;
 }
 
+/* Samain tinggi komponen kontrol */
 .control-row select,
-.control-row button {
+.control-row button,
+.control-row input[type="file"] {
   font-size: 12px;
-  padding: 4px 8px;
+  padding: 0 8px 0 8px;
+  /* padding: 4px 8px; */
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(20, 20, 20, 0.85);
   color: inherit;
+
+  height: 28px;
+  line-height: 28px;
 }
 
+.control-panel button {
+  cursor: pointer;
+}
+
+/* =========================
+   FILE INPUT (BIAR NYATU)
+   ========================= */
+.control-row input[type="file"] {
+  max-width: 240px;
+}
+
+/* Chrome/Safari */
+.control-row input[type="file"]::-webkit-file-upload-button {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 20, 20, 0.85);
+  color: inherit;
+  cursor: pointer;
+  margin-right: 10px;
+}
+
+/* Standard modern browsers */
+.control-row input[type="file"]::file-selector-button {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 20, 20, 0.85);
+  color: inherit;
+  cursor: pointer;
+  margin-right: 10px;
+}
+
+.control-row input[type="file"]::-webkit-file-upload-button:hover,
+.control-row input[type="file"]::file-selector-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* =========================
+   TIMELINE (SAMAIN TINGGI)
+   ========================= */
+.timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.timeline-row input[type="range"] {
+  height: 24px;
+  align-self: center;
+  flex: 1;
+  min-width: 160px;
+}
+
+.timeline-row span {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  min-width: 52px;
+  justify-content: flex-end;
+  font-size: 12px;
+}
+
+/* =========================
+   SECTION PANEL (KALAU DIPAKAI)
+   ========================= */
 .section-panel {
   flex-direction: column;
   align-items: stretch;
@@ -291,9 +397,9 @@ body,
   font-size: 12px;
 }
 
-.control-panel button {
-  cursor: pointer;
-}
+/* =========================
+   DOCK
+   ========================= */
 #dock {
   position: fixed;
   left: 50%;

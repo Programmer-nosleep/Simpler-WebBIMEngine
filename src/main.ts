@@ -1,5 +1,6 @@
 import './style.css'
 import * as THREE from "three";
+import * as OBC from "@thatopen/components";
 import { SkyDomeHelper, SkyDomeUI } from '../helpers/skydome';
 import { setupFaceSelection } from "../components/FaceSelection";
 import { AxesGizmo } from "../components/Gizmo";
@@ -13,6 +14,7 @@ import { createSelectionMarquee, type SelectionRect } from "../components/tools/
 import { LineTool } from "../components/Line";
 import { MoveTool } from "../components/Move";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
+import { IfcManager } from "../components/tools/ifc";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -38,6 +40,14 @@ const init = async () => {
 	});
 	setupNavigationInputBindings(cameraScene);
 	cameraScene.canvas.classList.add("three-main-canvas");
+
+	// Konfigurasi Mouse Controls (Opsional: Sesuaikan jika ingin gaya Revit/BIM)
+	// Default Three.js: LEFT=Orbit, MIDDLE=Dolly, RIGHT=Pan
+	if (cameraScene.camera.controls) {
+		// cameraScene.camera.controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+		// cameraScene.camera.controls.mouseButtons.middle = THREE.MOUSE.DOLLY;
+		// cameraScene.camera.controls.mouseButtons.right = THREE.MOUSE.PAN;
+	}
 
 	// 2. Setup Gizmo
 	setupGizmo(container, cameraScene);
@@ -98,6 +108,16 @@ const init = async () => {
 		fitScene: () => elevationControls.fitScene(),
 		setElevation: (dir: string) => elevationControls.setElevationView(dir as any),
 	};
+
+	// 11. Setup IFC Manager
+	try {
+		const components = new OBC.Components();
+		const ifcManager = new IfcManager(components);
+		await ifcManager.setup();
+		ifcManager.setupImporter("importer", cameraScene.scene);
+	} catch (error) {
+		console.warn("IFC Manager gagal diinisialisasi (mungkin file wasm kurang?):", error);
+	}
 };
 
 // --- Helper Functions ---
@@ -281,6 +301,7 @@ const setupSelectionSystem = (
 	};
 
 	const selectionMarquee = createSelectionMarquee(container, {
+		requireShift: true,
 		onSelection: (rect, event) => {
 			updateSelections(rect, { additive: event.shiftKey });
 		},
