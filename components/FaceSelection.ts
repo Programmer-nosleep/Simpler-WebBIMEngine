@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { Line2 } from "three/addons/lines/Line2.js";
-import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 

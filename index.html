@@ -36,18 +36,38 @@
           </div>
         </div>
 
-        <!-- Import (option GLB/OBJ/IFC) -->
+        <!-- Import -->
         <div class="control-panel">
           <label for="importerFormat">Import</label>
           <div class="control-row">
-            <select id="importerFormat">
+            <input type="file" id="importer" />
+            <button type="button">Import</button>
+          </div>
+        </div>
+
+        <!-- Export (SEBARIS) -->
+        <div class="control-panel">
+          <label for="exporterFormat">Export</label>
+          <div class="control-row">
+            <select id="exporterFormat">
               <option value="glb">GLB/GLTF</option>
               <option value="obj">OBJ</option>
               <option value="ifc">IFC</option>
             </select>
-            <input type="file" id="importer" />
+            <button type="button">Export</button>
           </div>
         </div>
+
+        <!-- Timeline (optional, kalau ada) -->
+        <!--
+        <div class="control-panel">
+          <label>Timeline</label>
+          <div class="timeline-row">
+            <input type="range" min="0" max="100" value="50" />
+            <span>11:03</span>
+          </div>
+        </div>
+        -->
       </div>
     </div>
 

@@ -1,6 +1,5 @@
 import './style.css'
 import * as THREE from "three";
-import * as OBC from "@thatopen/components";
 
 import { SkyDomeHelper, SkyDomeUI } from '../helpers/skydome';
 import { setupFaceSelection } from "../components/FaceSelection";
@@ -15,7 +14,7 @@ import { createSelectionMarquee, type SelectionRect } from "../components/tools/
 import { LineTool } from "../components/Line";
 import { MoveTool } from "../components/Move";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
-import { IfcManager } from "../components/tools/ifc";
+import { FileController } from "../components/tools/fileController";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -110,21 +109,15 @@ const init = async () => {
 		setElevation: (dir: string) => elevationControls.setElevationView(dir as any),
 	};
 
-	// 11. Setup IFC Manager
+	// 11. Setup Importer
 	try {
-		const components = new OBC.Components();
+		const importer = document.getElementById("importer") as HTMLInputElement | null;
+		if (!importer) throw new Error("Importer element #importer tidak ditemukan");
 
-		// FIX: Inject existing scene context into OBC Components
-		// OBC tools often expect components.scene/camera/renderer to exist.
-		(components as any).scene = { get: () => cameraScene.scene };
-		(components as any).camera = { get: () => cameraScene.camera.three };
-		(components as any).renderer = { get: () => cameraScene.world.renderer };
-
-		const ifcManager = new IfcManager(components);
-		await ifcManager.setup();
-		ifcManager.setupImporter("importer", cameraScene.scene);
+		const fileController = new FileController(cameraScene.scene, cameraScene.components);
+		fileController.setupImport(importer);
 	} catch (error) {
-		console.warn("IFC Manager gagal diinisialisasi (mungkin file wasm kurang?):", error);
+		console.warn("File importer gagal diinisialisasi:", error);
 	}
 };
 
@@ -322,7 +315,6 @@ const setupSelectionSystem = (
 	};
 
 	const selectionMarquee = createSelectionMarquee(container, {
-		requireShift: true,
 		onSelection: (rect, event) => {
 			updateSelections(rect, { additive: event.shiftKey });
 		},
@@ -403,6 +395,65 @@ const setupSelectionSystem = (
 		syncFaceSelection,
 		currentTool: "select" as DockToolId,
 		clearSelection,
+		selectAll: () => {
+			const roots = getSelectableRoots();
+			selectedObjects.forEach((obj) => setObjectSelection(obj, false));
+			selectedObjects.clear();
+			roots.forEach((obj) => {
+				setObjectSelection(obj, true);
+				selectedObjects.add(obj);
+			});
+			syncFaceSelection();
+		},
+		deleteSelected: async () => {
+			const toDelete = Array.from(selectedObjects);
+			toDelete.forEach((obj) => setObjectSelection(obj, false));
+			selectedObjects.clear();
+			syncFaceSelection();
+
+			const disposeMaterial = (material: THREE.Material) => {
+				const anyMaterial = material as any;
+				Object.values(anyMaterial).forEach((value) => {
+					if (value && typeof value === "object" && (value as any).isTexture) {
+						try {
+							(value as THREE.Texture).dispose();
+						} catch { }
+					}
+				});
+				try {
+					material.dispose();
+				} catch { }
+			};
+
+			const disposeObject3D = (object: THREE.Object3D) => {
+				object.traverse((child: any) => {
+					if (child.geometry?.dispose) {
+						try {
+							child.geometry.dispose();
+						} catch { }
+					}
+
+					const mat = child.material as THREE.Material | THREE.Material[] | undefined;
+					if (!mat) return;
+					if (Array.isArray(mat)) mat.forEach(disposeMaterial);
+					else disposeMaterial(mat);
+				});
+			};
+
+			for (const obj of toDelete) {
+				const fragmentsModel = (obj.userData as any)?.__fragmentsModel as
+					| { dispose?: () => Promise<void> | void }
+					| undefined;
+				if (fragmentsModel?.dispose) {
+					try {
+						await fragmentsModel.dispose();
+					} catch { }
+				}
+
+				obj.removeFromParent();
+				disposeObject3D(obj);
+			}
+		},
 	};
 	return selectionSystem;
 };
@@ -459,8 +510,7 @@ const setupDockSystem = async (
 		faceSelection.setSelectionByNormal(null);
 
 		if (tool === "select") {
-			// Jangan enable marquee secara langsung agar tidak memblokir Orbit
-			// selectionSystem.selectionMarquee.enable();
+			selectionSystem.selectionMarquee.enable();
 			selectionSystem.syncFaceSelection();
 		} else if (tool === "line") {
 			lineTool.enable();
@@ -511,22 +561,35 @@ const setupDockSystem = async (
 	});
 
 	window.addEventListener("keydown", (event) => {
-		// Aktifkan Marquee hanya saat Shift ditekan dalam mode Select
-		if (event.key === "Shift" && selectionSystem.currentTool === "select") {
-			selectionSystem.selectionMarquee.enable();
+		const activeElement = document.activeElement as HTMLElement | null;
+		const isTyping =
+			!!activeElement &&
+			(activeElement.tagName === "INPUT" ||
+				activeElement.tagName === "TEXTAREA" ||
+				activeElement.tagName === "SELECT" ||
+				activeElement.isContentEditable);
+
+		if (selectionSystem.currentTool === "select" && !isTyping) {
+			const key = event.key.toLowerCase();
+			if ((event.ctrlKey || event.metaKey) && key === "a") {
+				event.preventDefault();
+				selectionSystem.selectAll();
+				return;
+			}
+
+			if (event.key === "Backspace" || event.key === "Delete") {
+				event.preventDefault();
+				void selectionSystem.deleteSelected();
+				return;
+			}
 		}
+
 		if (event.key === "Escape") {
 			if (selectionSystem.currentTool !== "select") {
 				dock.setActiveTool("select");
 			} else {
 				selectionSystem.clearSelection();
 			}
-		}
-	});
-
-	window.addEventListener("keyup", (event) => {
-		if (event.key === "Shift") {
-			selectionSystem.selectionMarquee.disable();
 		}
 	});
 };

@@ -11,7 +11,6 @@ export type ElevationDirection = "north" | "south" | "east" | "west";
 
 export class ElevationCameraControls {
 	private cameraScene: any;
-	private is2DMode: boolean = false;
 
 	constructor(cameraScene: any) {
 		this.cameraScene = cameraScene;
@@ -49,7 +48,6 @@ export class ElevationCameraControls {
 	}
 
 	public setPerspective() {
-		this.is2DMode = false;
 		this.cameraScene.setProjection("Perspective");
 		this.cameraScene.setNavigationMode("Orbit");
 		this.setViewKeepDistance(null);
@@ -57,7 +55,6 @@ export class ElevationCameraControls {
 	}
 
 	public setIsoView() {
-		this.is2DMode = false;
 		this.cameraScene.setProjection("Orthographic");
 		this.cameraScene.setNavigationMode("Orbit");
 		this.setViewKeepDistance(null);
@@ -65,7 +62,6 @@ export class ElevationCameraControls {
 	}
 
 	public setTopView() {
-		this.is2DMode = true;
 		this.cameraScene.setProjection("Orthographic");
 		this.cameraScene.setNavigationMode("Plan");
 		this.setViewKeepDistance(new THREE.Vector3(0, 1, 0), {
@@ -76,7 +72,6 @@ export class ElevationCameraControls {
 	}
 
 	public setElevationView(dir: ElevationDirection) {
-		this.is2DMode = false;
 		this.cameraScene.setProjection("Perspective");
 		this.cameraScene.setNavigationMode("Orbit");
 

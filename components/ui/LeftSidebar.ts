@@ -55,7 +55,7 @@ function ensureContainer(root?: HTMLElement): HTMLElement {
 
   // Pastikan posisi sidebar ada di bawah panel atas (floating UI)
   container.style.position = "fixed";
-  container.style.top = "80px";
+  container.style.top = "70px";
   container.style.left = "12px";
   container.style.marginTop = "0";
 

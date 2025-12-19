@@ -2,6 +2,8 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as WEBIFC from "web-ifc";
 
+import fragmentsWorkerUrl from "@thatopen/fragments/dist/Worker/worker.mjs?url";
+
 export class IfcManager {
   components: OBC.Components;
   loader: OBC.IfcLoader;
@@ -12,25 +14,33 @@ export class IfcManager {
   }
 
   async setup() {
-    // Setup loader (pastikan file .wasm sudah tersedia di public directory atau dikonfigurasi)
-    await this.loader.setup();
-
-    // Optimasi: Exclude kategori yang berat dan jarang dibutuhkan visualisasinya
-    const excludedCats = [
-      WEBIFC.IFCTENDONANCHOR,
-      WEBIFC.IFCREINFORCINGBAR,
-      WEBIFC.IFCREINFORCINGELEMENT,
-    ];
-
-    for (const cat of excludedCats) {
-      this.loader.settings.excludedCategories.add(cat);
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized) {
+      fragments.init(fragmentsWorkerUrl);
     }
 
-    // Optimasi: Memindahkan model ke titik origin (0,0,0) untuk menghindari floating point error
-    // Cek apakah webIfc settings tersedia sebelum akses
-    if (this.loader.settings.webIfc) {
-      this.loader.settings.webIfc.COORDINATE_TO_ORIGIN = true;
-    }
+    await this.loader.setup({
+      autoSetWasm: false,
+      wasm: {
+        path: "/wasm/",
+        absolute: true,
+        logLevel: WEBIFC.LogLevel.LOG_LEVEL_OFF,
+      },
+      webIfc: {
+        ...this.loader.settings.webIfc,
+        COORDINATE_TO_ORIGIN: true,
+      },
+    });
+  }
+
+  async load(data: Uint8Array, name = "model.ifc", coordinate = true) {
+    return this.loader.load(data, coordinate, name);
+  }
+
+  async loadFile(file: File, coordinate = true) {
+    const data = await file.arrayBuffer();
+    const buffer = new Uint8Array(data);
+    return this.load(buffer, file.name, coordinate);
   }
 
   /**
@@ -51,12 +61,22 @@ export class IfcManager {
       if (!target.files || target.files.length === 0) return;
 
       const file = target.files[0];
+      const ext = file.name.split(".").pop()?.toLowerCase();
+      if (ext !== "ifc") {
+        console.warn(`File '${file.name}' bukan IFC (.ifc).`);
+        input.value = "";
+        return;
+      }
+
       const data = await file.arrayBuffer();
       const buffer = new Uint8Array(data);
       
       try {
-        const model = await this.loader.load(buffer);
-        scene.add(model);
+        const model = await this.load(buffer, file.name, true);
+        model.object.userData.selectable = true;
+        model.object.userData.entityType = "ifc";
+        model.object.userData.__fragmentsModel = model;
+        scene.add(model.object);
       } catch (error) {
         console.error("Gagal memuat file IFC:", error);
       }
