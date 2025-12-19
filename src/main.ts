@@ -12,6 +12,7 @@ import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
 import { LineTool } from "../components/Line";
 import { MoveTool } from "../components/Move";
+import { ElevationCameraControls } from "../components/ElevationCameraScene";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -21,7 +22,12 @@ const isNavigationMode = (value: string): value is NavigationModeOption =>
 	value === "Orbit" || value === "Plan";
 
 const init = async () => {
-	setupLeftSidebar();
+	let elevationControls: ElevationCameraControls;
+
+	setupLeftSidebar(undefined, {
+		onDefault: () => elevationControls?.setPerspective(),
+		onElevation: (dir) => elevationControls?.setElevationView(dir),
+	});
 	const container = document.getElementById("threejs");
 	if (!container) throw new Error("Container element #threejs tidak ditemukan");
 
@@ -45,8 +51,8 @@ const init = async () => {
 	// 5. Setup Face Selection
 	const faceSelection = setupFaceSelection({
 		scene: cameraScene.scene,
-		cube: testObjectData.cube,
-		cubeGeometry: testObjectData.cubeGeometry,
+		faceObject: testObjectData.cube,
+		objectGeometry: testObjectData.cubeGeometry,
 		faceMaterials: testObjectData.faceMaterials,
 		faceBaseColor: testObjectData.faceBaseColor,
 		faceHoverColor: testObjectData.faceHoverColor,
@@ -82,6 +88,16 @@ const init = async () => {
 
 	// 9. Setup Dock & Tool State Management
 	await setupDockSystem(cameraScene, lineTool, moveTool, selectionSystem, faceSelection);
+
+	// 10. Setup Elevation & Camera Controls
+	elevationControls = new ElevationCameraControls(cameraScene);
+	(window as any).qreaseeCamera = {
+		perspective: () => elevationControls.setPerspective(),
+		orthographicIso: () => elevationControls.setIsoView(),
+		orthographicTop: () => elevationControls.setTopView(),
+		fitScene: () => elevationControls.fitScene(),
+		setElevation: (dir: string) => elevationControls.setElevationView(dir as any),
+	};
 };
 
 // --- Helper Functions ---
@@ -167,11 +183,17 @@ const setupSelectionSystem = (
 		return roots;
 	};
 
-	const syncFaceSelection = () => {
+	const syncFaceSelection = (primaryObject?: THREE.Object3D, primaryNormal?: THREE.Vector3) => {
 		if (selectedObjects.size > 0) {
-			faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
+			const items = Array.from(selectedObjects).map((obj) => {
+				if (obj === primaryObject && primaryNormal) {
+					return { object: obj, normal: primaryNormal };
+				}
+				return { object: obj };
+			});
+			faceSelection.setSelectedObjects(items);
 		} else {
-			faceSelection.setSelectionByNormal(null);
+			faceSelection.setSelectedObjects([]);
 		}
 	};
 
@@ -282,7 +304,7 @@ const setupSelectionSystem = (
 		syncFaceSelection();
 	};
 
-	const selectSingleObject = (object: THREE.Object3D) => {
+	const selectSingleObject = (object: THREE.Object3D, normal?: THREE.Vector3) => {
 		Array.from(selectedObjects).forEach((obj) => {
 			if (obj === object) return;
 			setObjectSelection(obj, false);
@@ -292,18 +314,19 @@ const setupSelectionSystem = (
 			setObjectSelection(object, true);
 			selectedObjects.add(object);
 		}
-		syncFaceSelection();
+		syncFaceSelection(object, normal);
 	};
 
-	const toggleObjectSelection = (object: THREE.Object3D) => {
+	const toggleObjectSelection = (object: THREE.Object3D, normal?: THREE.Vector3) => {
 		if (selectedObjects.has(object)) {
 			setObjectSelection(object, false);
 			selectedObjects.delete(object);
+			syncFaceSelection();
 		} else {
 			setObjectSelection(object, true);
 			selectedObjects.add(object);
+			syncFaceSelection(object, normal);
 		}
-		syncFaceSelection();
 	};
 
 	const onCanvasPointerUp = (event: PointerEvent) => {
@@ -318,15 +341,16 @@ const setupSelectionSystem = (
 
 		selectionRaycaster.setFromCamera(selectionPointer, cameraScene.camera.three);
 		const hits = selectionRaycaster.intersectObjects(getSelectableRoots(), true);
-		const root = hits[0] ? findSelectableRoot(hits[0].object) : null;
+		const hit = hits[0];
+		const root = hit ? findSelectableRoot(hit.object) : null;
 
 		if (!root) {
 			if (!event.shiftKey) clearSelection();
 			return;
 		}
 
-		if (event.shiftKey) toggleObjectSelection(root);
-		else selectSingleObject(root);
+		if (event.shiftKey) toggleObjectSelection(root, hit.face?.normal);
+		else selectSingleObject(root, hit.face?.normal);
 	};
 
 	cameraScene.canvas.addEventListener("pointerup", onCanvasPointerUp);
@@ -394,9 +418,7 @@ const setupDockSystem = async (
 
 		if (tool === "select") {
 			selectionSystem.selectionMarquee.enable();
-			if (selectionSystem.selectedObjects.size > 0) {
-				faceSelection.setSelectionByNormal(new THREE.Vector3(0, 0, 1), true);
-			}
+			selectionSystem.syncFaceSelection();
 		} else if (tool === "line") {
 			lineTool.enable();
 		} else if (tool === "move") {

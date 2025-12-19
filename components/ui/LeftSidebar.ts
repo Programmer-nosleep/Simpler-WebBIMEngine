@@ -25,6 +25,11 @@ export type SidebarSectionItem = {
   onSelect?: () => void;
 };
 
+export type LeftSidebarCallbacks = {
+  onDefault?: () => void;
+  onElevation?: (dir: "north" | "south" | "west" | "east") => void;
+};
+
 export type LeftSidebarHandle = {
   setSectionItems: (items: SidebarSectionItem[]) => void;
   onSectionAdd: (handler: () => void) => void;
@@ -37,31 +42,6 @@ type SidebarSection = {
   items: SidebarSectionItem[];
   collapsed?: boolean;
 };
-
-const sections: SidebarSection[] = [
-  {
-    id: "views",
-    title: "3D Views",
-    items: [{ id: "default", label: "Default", icon: "eye" }],
-  },
-  {
-    id: "elevations",
-    title: "Elevations",
-    subtitle: "(Building Elevation)",
-    items: [
-      { id: "north", label: "North", icon: "eye" },
-      { id: "south", label: "South", icon: "eye" },
-      { id: "west", label: "West", icon: "eye" },
-      { id: "east", label: "East", icon: "eye" },
-    ],
-  },
-  {
-    id: "sections",
-    title: "Section",
-    subtitle: "(Plans)",
-    items: [],
-  },
-];
 
 function ensureContainer(root?: HTMLElement): HTMLElement {
   if (root) return root;
@@ -81,7 +61,7 @@ function createIconElement(name: IconName): HTMLElement {
   return span;
 }
 
-export function setupLeftSidebar(root?: HTMLElement): LeftSidebarHandle {
+export function setupLeftSidebar(root?: HTMLElement, callbacks?: LeftSidebarCallbacks): LeftSidebarHandle {
   const container = ensureContainer(root);
   container.innerHTML = "";
   container.setAttribute("role", "navigation");
@@ -89,6 +69,31 @@ export function setupLeftSidebar(root?: HTMLElement): LeftSidebarHandle {
 
   let sectionListRef: HTMLUListElement | null = null;
   let sectionAddButton: HTMLButtonElement | null = null;
+
+  const sections: SidebarSection[] = [
+    {
+      id: "views",
+      title: "3D Views",
+      items: [{ id: "default", label: "Default", icon: "eye", onSelect: () => callbacks?.onDefault?.() }],
+    },
+    {
+      id: "elevations",
+      title: "Elevations",
+      subtitle: "(Building Elevation)",
+      items: [
+        { id: "north", label: "North", icon: "eye", onSelect: () => callbacks?.onElevation?.("north") },
+        { id: "south", label: "South", icon: "eye", onSelect: () => callbacks?.onElevation?.("south") },
+        { id: "west", label: "West", icon: "eye", onSelect: () => callbacks?.onElevation?.("west") },
+        { id: "east", label: "East", icon: "eye", onSelect: () => callbacks?.onElevation?.("east") },
+      ],
+    },
+    {
+      id: "sections",
+      title: "Section",
+      subtitle: "(Plans)",
+      items: [],
+    },
+  ];
 
   sections.forEach((section) => {
     const sectionEl = document.createElement("section");
