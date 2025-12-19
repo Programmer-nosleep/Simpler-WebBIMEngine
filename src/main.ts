@@ -96,6 +96,8 @@ const init = async () => {
 	const extrudeTool = new ExtrudeTool(getCamera, container, {
 		getSelectedObjects: () => selectionSystem.selectedObjects,
 		getControls: () => cameraScene.camera.controls as any,
+		getScene: () => cameraScene.scene,
+		onHover: (obj, idx) => faceSelection.setHovered(obj, idx),
 		wallThickness: 0.15,
 		floorThickness: 0.1,
 	});
@@ -193,7 +195,7 @@ const setupEnvironment = (cameraScene: any) => {
 	setupGrid(cameraScene, { yOffset: -0.5 });
 	// Non-aktifkan raycasting pada GridHelper agar tidak mengganggu Orbit
 	cameraScene.scene.traverse((child: any) => {
-		if (child.isGridHelper) child.raycast = () => {};
+		if (child.isGridHelper) child.raycast = () => { };
 	});
 
 	// Axes World Setup
@@ -201,7 +203,7 @@ const setupEnvironment = (cameraScene: any) => {
 	axesWorld.position.y = -0.5;
 	// Non-aktifkan raycasting pada AxesWorld agar tidak mengganggu Orbit/Line tool
 	axesWorld.traverse((child) => {
-		child.raycast = () => {};
+		child.raycast = () => { };
 	});
 	cameraScene.scene.add(axesWorld);
 
@@ -398,6 +400,9 @@ const setupSelectionSystem = (
 		}
 	};
 
+	let lastClickTime = 0;
+	const DOUBLE_CLICK_DELAY = 300;
+
 	const onCanvasPointerUp = (event: PointerEvent) => {
 		if (selectionSystem.currentTool !== "select") return;
 
@@ -413,13 +418,26 @@ const setupSelectionSystem = (
 		const hit = hits[0];
 		const root = hit ? findSelectableRoot(hit.object) : null;
 
+		const now = performance.now();
+		const isDoubleClick = (now - lastClickTime) < DOUBLE_CLICK_DELAY;
+		lastClickTime = now;
+
 		if (!root) {
 			if (!event.shiftKey) clearSelection();
 			return;
 		}
 
-		if (event.shiftKey) toggleObjectSelection(root, hit.face?.normal);
-		else selectSingleObject(root, hit.face?.normal);
+		if (event.shiftKey) {
+			toggleObjectSelection(root, hit.face?.normal);
+		} else {
+			if (isDoubleClick) {
+				// Double click: Select whole object (no normal restriction)
+				selectSingleObject(root, undefined);
+			} else {
+				// Single click: Select specific face
+				selectSingleObject(root, hit.face?.normal);
+			}
+		}
 	};
 
 	cameraScene.canvas.addEventListener("pointerup", onCanvasPointerUp);

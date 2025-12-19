@@ -598,7 +598,9 @@ export class LineTool {
 
     const planeFilter = options?.plane;
     const includeMeshEdges = options?.includeMeshEdges ?? false;
-    const meshEdgeThresholdAngle = options?.meshEdgeThresholdAngle ?? 25;
+    // meshEdgeThresholdAngle ignored here, we force 1 degree for strictness inside the loop if needed, or stick to passed value if we trust it.
+    // But per user request "perfect", sticking to 1.
+
     const extraPolyline = options?.extraPolyline;
 
     // Ensure matrixWorld is up to date before sampling lines/meshes.
@@ -632,7 +634,7 @@ export class LineTool {
       }
     });
 
-    if (lineSources.length === 0) return;
+    if (lineSources.length === 0 && (!extraPolyline || extraPolyline.length < 2)) return;
 
     // Re-sync createdFaceHashes with the scene to allow re-creation of deleted faces
     this.createdFaceHashes.clear();
@@ -693,39 +695,115 @@ export class LineTool {
       addEdge(getIndex(aWorld), getIndex(bWorld), source === "user");
     };
 
-    const addSegmentsFromLine = (line: THREE.Line) => {
+    // --- NEW: Multi-pass Splitting Logic ---
+
+    // 1. Collect all potential "Splitter" points.
+    // These are endpoints of user lines, face outlines, and the current drawing polyline.
+    const splitters: THREE.Vector3[] = [];
+    // We can filter mostly by key to avoid duplicate processing, but need Vector3 for distance checks.
+    const splitterKeys = new Set<string>();
+
+    const addSplitter = (v: THREE.Vector3) => {
+      const k = keyOf(v);
+      if (!splitterKeys.has(k)) {
+        splitterKeys.add(k);
+        splitters.push(v);
+      }
+    };
+
+    // From extraPolyline
+    if (extraPolyline) {
+      extraPolyline.forEach(p => addSplitter(p));
+    }
+
+    // From lineSources
+    for (const line of lineSources) {
       const geom = line.geometry;
-      if (!(geom instanceof THREE.BufferGeometry)) return;
-      const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
-      if (!pos) return;
+      if (!(geom instanceof THREE.BufferGeometry)) continue;
+      const pos = geom.getAttribute("position");
+      if (!pos) continue;
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(line.matrixWorld);
+        addSplitter(v);
+      }
+    }
+
+    // Helper: Add segment A-B but split it by any collinear points in 'splitters'
+    const addSegmentWithSplits = (a: THREE.Vector3, b: THREE.Vector3, source: "user" | "mesh") => {
+      let start = a;
+      let end = b;
+
+      // Snap endpoints to existing splitters to ensure connectivity
+      for (const v of splitters) {
+        if (start !== v && start.distanceTo(v) < 1e-4) start = v;
+        if (end !== v && end.distanceTo(v) < 1e-4) end = v;
+      }
+
+      const splitPoints: { pt: THREE.Vector3, dist: number }[] = [];
+      const dAB = start.distanceTo(end);
+
+      // Optimization: bounding box check?
+      // For now, simple iteration. splitters.length is usually small (<1000).
+      for (const v of splitters) {
+        if (v === start || v === end) continue;
+
+        const dAP = start.distanceTo(v);
+        const dPB = v.distanceTo(end);
+
+        // Use a tighter tolerance for collinearity
+        if (Math.abs(dAP + dPB - dAB) < 1e-4) {
+          splitPoints.push({ pt: v, dist: dAP });
+        }
+      }
+
+      if (splitPoints.length === 0) {
+        includeSegment(start, end, source);
+        return;
+      }
+
+      splitPoints.sort((x, y) => x.dist - y.dist);
+      let curr = start;
+      for (const sp of splitPoints) {
+        includeSegment(curr, sp.pt, source);
+        curr = sp.pt;
+      }
+      includeSegment(curr, end, source);
+    };
+
+    // 2. Process Line Sources (User Lines & Face Outlines)
+    for (const line of lineSources) {
+      const geom = line.geometry;
+      const pos = geom.getAttribute("position");
+      if (!pos) continue;
 
       const pts: THREE.Vector3[] = [];
       for (let i = 0; i < pos.count; i++) {
         pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(line.matrixWorld));
       }
 
-      const isLineSegments = (line as any).isLineSegments === true;
-      if (isLineSegments) {
+      const isSegs = (line as any).isLineSegments === true;
+      if (isSegs) {
         for (let i = 0; i < pts.length - 1; i += 2) {
-          includeSegment(pts[i], pts[i + 1], "user");
+          addSegmentWithSplits(pts[i], pts[i + 1], "user");
         }
       } else {
         for (let i = 0; i < pts.length - 1; i++) {
-          includeSegment(pts[i], pts[i + 1], "user");
+          addSegmentWithSplits(pts[i], pts[i + 1], "user");
         }
-      }
-    };
-
-    for (const line of lineSources) addSegmentsFromLine(line);
-
-    if (extraPolyline && extraPolyline.length >= 2) {
-      for (let i = 0; i < extraPolyline.length - 1; i++) {
-        includeSegment(extraPolyline[i], extraPolyline[i + 1], "user");
       }
     }
 
+    // 3. Process Extra Polyline (Current drawing)
+    if (extraPolyline && extraPolyline.length >= 2) {
+      for (let i = 0; i < extraPolyline.length - 1; i++) {
+        addSegmentWithSplits(extraPolyline[i], extraPolyline[i + 1], "user");
+      }
+    }
+
+    // 4. Process Mesh Edges
     if (includeMeshEdges) {
-      const seedKeys = new Set(keyToIndex.keys());
+      // Seed keys for mesh edges: must touch the known graph (splitters)
       const a = new THREE.Vector3();
       const b = new THREE.Vector3();
 
@@ -735,13 +813,13 @@ export class LineTool {
         if (!(obj as any).isMesh) return;
 
         const mesh = obj as THREE.Mesh;
-        if (mesh.userData?.entityType === "face") return; // already represented by outlines
+        if (mesh.userData?.entityType === "face") return; // outlines already handled above
 
         const geom = mesh.geometry;
         if (!(geom instanceof THREE.BufferGeometry)) return;
         if (!geom.getAttribute("position")) return;
 
-        const edgesGeom = this.getMeshEdgesGeometry(geom, meshEdgeThresholdAngle);
+        const edgesGeom = this.getMeshEdgesGeometry(geom, 1); // 1 degree threshold
         const pos = edgesGeom.getAttribute("position") as THREE.BufferAttribute | undefined;
         if (!pos) return;
 
@@ -749,18 +827,37 @@ export class LineTool {
           a.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
           b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1)).applyMatrix4(mesh.matrixWorld);
 
-          // Only use mesh edges that are incident to the current user/outline graph.
-          // Prevents creating faces purely from existing mesh wireframes.
-          const ka = keyOf(a);
-          const kb = keyOf(b);
-          if (!seedKeys.has(ka) && !seedKeys.has(kb)) continue;
+          // We check if this mesh edge connects to our splitter graph.
+          // BUT, we also check if any splitter LIES ON this edge.
+          // If a splitter lies on it, we definitively want to include (and split) it.
+          // If just endpoints match, we include it.
 
-          includeSegment(a, b, "mesh");
+          let relevant = false;
+          if (splitterKeys.has(keyOf(a)) || splitterKeys.has(keyOf(b))) {
+            relevant = true;
+          } else {
+            // Check if any splitter is on the segment
+            const dAB = a.distanceTo(b);
+            for (const v of splitters) {
+              const dAP = a.distanceTo(v);
+              const dPB = v.distanceTo(b);
+              if (Math.abs(dAP + dPB - dAB) < 1e-4) {
+                relevant = true;
+                break;
+              }
+            }
+          }
+
+          if (relevant) {
+            addSegmentWithSplits(a, b, "mesh");
+          }
         }
       });
     }
 
     if (edges.length === 0) return;
+
+    // ... Plane and Cycle detection ...
 
     // Candidate planes from pairs of incident edges (allows planar faces even when the whole graph is non-planar).
     const canonicalizeNormal = (n: THREE.Vector3) => {

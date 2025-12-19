@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+// import { createCornerConnectors, createEdgesOverlay, disposeObjectDeep } from "../helpers/threeHelpers";
 
 export type FaceSelectionOptions = {
   scene: THREE.Scene;
@@ -108,93 +109,16 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     return geometry;
   }
 
-  const _v0 = new THREE.Vector3();
-  const _v1 = new THREE.Vector3();
-  const _v2 = new THREE.Vector3();
 
-  function isPointInTriangle(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) {
-    _v0.subVectors(c, a);
-    _v1.subVectors(b, a);
-    _v2.subVectors(p, a);
 
-    const dot00 = _v0.dot(_v0);
-    const dot01 = _v0.dot(_v1);
-    const dot02 = _v0.dot(_v2);
-    const dot11 = _v1.dot(_v1);
-    const dot12 = _v1.dot(_v2);
 
-    const denom = dot00 * dot11 - dot01 * dot01;
-    if (denom === 0) return false;
-    const invDenom = 1 / denom;
-    const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
-    const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
 
-    return (u >= 0) && (v >= 0) && (u + v < 1);
-  }
+  function getFaceInfoFromNormal(normal: THREE.Vector3, box: THREE.Box3) {
+    const objectSize = new THREE.Vector3();
+    box.getSize(objectSize);
+    const objectCenter = new THREE.Vector3();
+    box.getCenter(objectCenter);
 
-  function createDotsGeometryFromMesh(mesh: THREE.Mesh, spacing: number) {
-    const geometry = mesh.geometry;
-    if (!geometry.boundingBox) geometry.computeBoundingBox();
-    const box = geometry.boundingBox!;
-
-    const positions: number[] = [];
-    const posAttr = geometry.getAttribute("position");
-    const indexAttr = geometry.getIndex();
-
-    const vA = new THREE.Vector3();
-    const vB = new THREE.Vector3();
-    const vC = new THREE.Vector3();
-    const p = new THREE.Vector3();
-
-    for (let x = box.min.x; x <= box.max.x; x += spacing) {
-      for (let y = box.min.y; y <= box.max.y; y += spacing) {
-        p.set(x, y, 0);
-        let inside = false;
-
-        if (indexAttr) {
-          for (let i = 0; i < indexAttr.count; i += 3) {
-            vA.fromBufferAttribute(posAttr, indexAttr.getX(i));
-            vB.fromBufferAttribute(posAttr, indexAttr.getX(i + 1));
-            vC.fromBufferAttribute(posAttr, indexAttr.getX(i + 2));
-            if (isPointInTriangle(p, vA, vB, vC)) {
-              inside = true;
-              break;
-            }
-          }
-        } else {
-          for (let i = 0; i < posAttr.count; i += 3) {
-            vA.fromBufferAttribute(posAttr, i);
-            vB.fromBufferAttribute(posAttr, i + 1);
-            vC.fromBufferAttribute(posAttr, i + 2);
-            if (isPointInTriangle(p, vA, vB, vC)) {
-              inside = true;
-              break;
-            }
-          }
-        }
-
-        if (inside) positions.push(x, y, 0);
-      }
-    }
-
-    const geometryDots = new THREE.BufferGeometry();
-    geometryDots.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(positions, 3)
-    );
-    return geometryDots;
-  }
-
-  function createBorderGeometryFromMesh(mesh: THREE.Mesh) {
-    const geometry = mesh.geometry;
-    const edges = new THREE.EdgesGeometry(geometry);
-    const lineGeo = new LineGeometry();
-    lineGeo.setPositions(edges.attributes.position.array as Float32Array);
-    edges.dispose();
-    return lineGeo;
-  }
-
-  function getFaceInfoFromNormal(normal: THREE.Vector3) {
     const absX = Math.abs(normal.x);
     const absY = Math.abs(normal.y);
     const absZ = Math.abs(normal.z);
@@ -211,7 +135,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       const sign = normal.x >= 0 ? 1 : -1;
       faceNormal.set(sign, 0, 0);
       faceCenter.set(
-        sign > 0 ? objectBox.max.x : objectBox.min.x,
+        sign > 0 ? box.max.x : box.min.x,
         objectCenter.y,
         objectCenter.z
       );
@@ -224,7 +148,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       faceNormal.set(0, sign, 0);
       faceCenter.set(
         objectCenter.x,
-        sign > 0 ? objectBox.max.y : objectBox.min.y,
+        sign > 0 ? box.max.y : box.min.y,
         objectCenter.z
       );
       faceRotation.set(sign > 0 ? -Math.PI / 2 : Math.PI / 2, 0, 0);
@@ -237,7 +161,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       faceCenter.set(
         objectCenter.x,
         objectCenter.y,
-        sign > 0 ? objectBox.max.z : objectBox.min.z
+        sign > 0 ? box.max.z : box.min.z
       );
       faceRotation.set(0, sign > 0 ? 0 : Math.PI, 0);
       faceWidth = objectSize.x;
@@ -258,7 +182,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   const pointer = new THREE.Vector2();
   let hoveredObject: THREE.Object3D | null = null;
   let hoveredFaceIndex: number | null = null;
-  
+
   // State untuk multi-selection
   let currentSelection: { object: THREE.Object3D; normal?: THREE.Vector3 }[] = [];
   const activeOverlays = new Map<number, { group: THREE.Group; dots: THREE.Points; border: Line2 }>();
@@ -334,7 +258,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         // Create new overlay
         const group = new THREE.Group();
         group.renderOrder = 2;
-        
+
         const dots = new THREE.Points(new THREE.BufferGeometry(), dotsMaterial);
         dots.renderOrder = 2;
         group.add(dots);
@@ -379,8 +303,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   ) {
     if (obj === faceObject) {
       if (normal) {
-        const faceInfo = getFaceInfoFromNormal(normal);
-        
+        const faceInfo = getFaceInfoFromNormal(normal, objectBox);
+
         overlay.group.position
           .copy(faceInfo.center)
           .addScaledVector(faceInfo.normal, SURFACE_OFFSET);
@@ -388,7 +312,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
         overlay.dots.geometry.dispose();
         overlay.dots.geometry = createDotsGeometry(faceInfo.width, faceInfo.height, DOT_SPACING);
-        
+
         overlay.border.geometry.dispose();
         overlay.border.geometry = createBorderGeometry(faceInfo.width, faceInfo.height);
       } else {
@@ -405,11 +329,11 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
         const v = new THREE.Vector3();
         normals.forEach(n => {
-          const info = getFaceInfoFromNormal(n);
+          const info = getFaceInfoFromNormal(n, objectBox);
           const dotsGeo = createDotsGeometry(info.width, info.height, DOT_SPACING);
           const posAttr = dotsGeo.getAttribute('position');
           const offset = n.clone().multiplyScalar(SURFACE_OFFSET);
-          
+
           for (let i = 0; i < posAttr.count; i++) {
             v.fromBufferAttribute(posAttr, i);
             v.applyEuler(info.rotation);
@@ -433,15 +357,53 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       }
     } else {
       const mesh = obj as THREE.Mesh;
-      overlay.group.position.set(0, 0, SURFACE_OFFSET);
-      overlay.group.rotation.set(0, 0, 0);
-      overlay.group.scale.set(1, 1, 1);
 
-      overlay.dots.geometry.dispose();
-      overlay.dots.geometry = createDotsGeometryFromMesh(mesh, DOT_SPACING);
+      // Compute mesh logical bounds for face calculation
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const meshBox = mesh.geometry.boundingBox || new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
 
-      overlay.border.geometry.dispose();
-      overlay.border.geometry = createBorderGeometryFromMesh(mesh);
+      if (normal) {
+        // Single Face Selection
+        const faceInfo = getFaceInfoFromNormal(normal, meshBox);
+
+        overlay.group.position
+          .copy(faceInfo.center)
+          .addScaledVector(faceInfo.normal, SURFACE_OFFSET);
+        overlay.group.rotation.copy(faceInfo.rotation);
+        overlay.group.scale.set(1, 1, 1);
+
+        overlay.dots.geometry.dispose();
+        overlay.dots.geometry = createDotsGeometry(faceInfo.width, faceInfo.height, DOT_SPACING);
+
+        overlay.border.geometry.dispose();
+        overlay.border.geometry = createBorderGeometry(faceInfo.width, faceInfo.height);
+
+      } else {
+        // Whole Object Selection - Use helpers from threeHelpers
+        overlay.group.position.set(0, 0, 0);
+        overlay.group.rotation.set(0, 0, 0);
+        overlay.group.scale.set(1, 1, 1);
+
+        // Remove old custom dots/border logic if present in this group
+        overlay.dots.visible = false;
+        overlay.border.visible = false;
+
+        // Clear previous children that might be our helpers
+        for (let i = overlay.group.children.length - 1; i >= 0; i--) {
+          const child = overlay.group.children[i];
+          if ((child as any).userData?.isEdgesOverlay || (child as any).userData?.isConnectorsGroup) {
+            overlay.group.remove(child);
+            disposeObjectDeep(child);
+          }
+        }
+
+        // Create new overlays - Use robust specific helper
+        const edges = createEdgesOverlay(obj, { color: 0x00ff00, linewidth: 2, depthTest: false });
+        overlay.group.add(edges);
+
+        const connectors = createCornerConnectors(obj, { color: 0x00ff00, size: 0.075 });
+        overlay.group.add(connectors);
+      }
     }
   }
 
@@ -492,6 +454,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     updateSelectEffect();
   };
 
+  const setHovered = (object: THREE.Object3D | null, faceIndex: number | null) => {
+    hoveredObject = object;
+    hoveredFaceIndex = faceIndex;
+    canvas.style.cursor = hoveredObject ? "pointer" : "";
+    updateSelectEffect();
+  };
+
   updateSelectEffect();
   requestAnimationFrame(updateSelectEffect);
 
@@ -499,11 +468,12 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     updateSelectEffect,
     setSelectionByNormal,
     setSelectedObjects,
+    setHovered,
     dispose() {
       window.removeEventListener("resize", onResize);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerleave", onPointerLeave);
-      
+
       activeOverlays.forEach(overlay => {
         overlay.group.removeFromParent();
         overlay.dots.geometry.dispose();

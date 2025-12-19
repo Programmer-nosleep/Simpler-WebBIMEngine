@@ -8,6 +8,8 @@ type ControlsLike = {
 export type ExtrudeToolOptions = {
   getSelectedObjects: () => Set<THREE.Object3D>;
   getControls?: () => ControlsLike | null;
+  getScene: () => THREE.Scene;
+  onHover?: (object: THREE.Object3D | null, faceIndex: number | null) => void;
   wallThickness?: number;
   floorThickness?: number;
 };
@@ -21,9 +23,22 @@ type ActiveExtrudeState = {
   lastHollow: boolean;
   axisVector: THREE.Vector3;
   dragPlane: THREE.Plane;
-  startPlanePoint: THREE.Vector3;
+  startPlanePoint: THREE.Vector3; // World point where drag started
+  faceCenter: THREE.Vector3; // Approximate center of the face being extruded
   pointerId: number;
   previousControlsEnabled: boolean | null;
+  // New Pull Mode State
+  mode: 'normal' | 'pull';
+  pullKind?: 'rect' | 'circle' | 'poly';
+  pullState?: {
+    center?: { x: number; z: number };
+    width?: number;
+    length?: number;
+    radius?: number;
+    vertices?: Array<{ x: number; z: number }>;
+    startMouseY: number;
+    inputEl: HTMLInputElement;
+  };
 };
 
 export class ExtrudeTool {
@@ -75,6 +90,17 @@ export class ExtrudeTool {
     if (event.key === "Escape") {
       this.cancelActiveExtrude();
     }
+    if (event.key === "Enter" && this.active?.mode === 'pull') {
+      // Commit numeric input
+      const val = parseFloat(this.active.pullState?.inputEl.value || '0');
+      if (Number.isFinite(val) && val > 0) {
+        this.updatePullGeometry(this.active.mesh, val, this.active.pullKind!, this.active.pullState!);
+        this.active.lastDepth = val;
+        this.finishActiveExtrude({ commit: true });
+      } else {
+        this.finishActiveExtrude({ commit: true }); // commit current drag? or cancel? usually enter commits.
+      }
+    }
   };
 
   private onPointerDown = (event: PointerEvent) => {
@@ -82,12 +108,58 @@ export class ExtrudeTool {
     if (event.button !== 0) return;
     if (this.active) return;
 
-    const selectedMesh = this.getSelectedExtrudableMesh();
-    if (!selectedMesh) return;
+    let selectedMesh = this.getSelectedExtrudableMesh();
+    let hit: THREE.Intersection | null = null;
 
-    // Require the pointer to actually hit the selected mesh.
-    const hit = this.raycastMesh(event, selectedMesh);
-    if (!hit) return;
+    if (selectedMesh) {
+      // Require the pointer to actually hit the selected mesh.
+      hit = this.raycastMesh(event, selectedMesh);
+    } else {
+      // Try to find a mesh under the cursor from the scene
+      const scene = this.options.getScene();
+      const candidates: THREE.Mesh[] = [];
+      scene.traverse((obj) => {
+        if ((obj as any).isMesh) {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.visible && !mesh.userData.isHelper) {
+            candidates.push(mesh);
+          }
+        }
+      });
+
+      const rect = this.container.getBoundingClientRect();
+      this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      this.raycaster.setFromCamera(this.mouse, this.getCamera());
+
+      const hits = this.raycaster.intersectObjects(candidates, true);
+
+      // Hover logic
+      if (hits.length > 0) {
+        const first = hits[0];
+        // Check if extrudable
+        const mesh = this.findExtrudableMesh(first.object);
+        if (mesh) {
+          this.options.onHover?.(mesh, first.faceIndex ?? null);
+        } else {
+          this.options.onHover?.(null, null);
+        }
+      } else {
+        this.options.onHover?.(null, null);
+      }
+
+      for (const h of hits) {
+        // Check if this object is extrudable
+        const mesh = this.findExtrudableMesh(h.object);
+        if (mesh) {
+          selectedMesh = mesh;
+          hit = h;
+          break;
+        }
+      }
+    }
+
+    if (!selectedMesh || !hit) return;
 
     const shape = this.getShapeFromGeometry(selectedMesh.geometry);
     if (!shape) {
@@ -96,13 +168,82 @@ export class ExtrudeTool {
     }
 
     const startDepth = this.getDepthFromMesh(selectedMesh);
-    const axisVector = this.getMeshNormalWorld(selectedMesh);
+
+    // Use the specific face normal if available, otherwise fallback to mesh direction
+    let axisVector = this.getMeshNormalWorld(selectedMesh);
+    if (hit.face && hit.face.normal) {
+      // Transform local normal to world
+      axisVector = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
+    }
+
     const dragPlane = this.computeDragPlane(axisVector, hit.point.clone());
     if (!dragPlane) return;
 
     const controls = this.options.getControls?.() ?? null;
     const previousControlsEnabled = controls ? controls.enabled : null;
     if (controls) controls.enabled = false;
+
+    const faceCenter = new THREE.Vector3();
+    if (selectedMesh.geometry.boundingBox) {
+      selectedMesh.geometry.boundingBox.getCenter(faceCenter);
+      selectedMesh.localToWorld(faceCenter);
+    } else {
+      faceCenter.copy(hit.point);
+    }
+
+    // Check for Pull Mode (surfaceMeta)
+    const ud: any = selectedMesh.userData || {};
+    let mode: 'normal' | 'pull' = 'normal';
+    let pullKind: 'rect' | 'circle' | 'poly' | undefined;
+    let pullState: ActiveExtrudeState['pullState'];
+
+    const meta = ud.surfaceMeta;
+    if (meta && (meta.kind === 'rect' || meta.kind === 'circle' || meta.kind === 'poly')) {
+      mode = 'pull';
+      pullKind = meta.kind;
+
+      // Setup Input
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'height';
+      input.className = 'qreasee-pull-input'; // Keep class name for consistency if styled elsewhere
+      Object.assign(input.style, {
+        position: 'fixed',
+        left: `${event.clientX + 10}px`,
+        top: `${event.clientY + 10}px`,
+        zIndex: '9999',
+        padding: '4px 6px',
+        fontSize: '12px',
+        border: '1px solid #ccc',
+        borderRadius: '4px',
+        background: 'rgba(255,255,255,0.95)'
+      });
+      document.body.appendChild(input);
+
+      // Focus and select all for quick replace
+      input.value = startDepth.toFixed(2);
+      input.select(); // setTimeout maybe needed? pointerdown might steal focus back.
+      // We defer focus? 
+      setTimeout(() => input.focus(), 10);
+
+      let center, width, length, radius, vertices;
+      if (pullKind === 'rect') {
+        center = { x: meta.center[0], z: meta.center[1] };
+        width = meta.width;
+        length = meta.length;
+      } else if (pullKind === 'circle') {
+        center = { x: meta.center[0], z: meta.center[1] };
+        radius = meta.radius;
+      } else if (pullKind === 'poly') {
+        vertices = meta.vertices.map((p: any) => ({ x: p[0], z: p[1] }));
+      }
+
+      pullState = {
+        center, width, length, radius, vertices,
+        startMouseY: event.clientY,
+        inputEl: input
+      };
+    }
 
     this.active = {
       mesh: selectedMesh,
@@ -114,8 +255,12 @@ export class ExtrudeTool {
       axisVector,
       dragPlane,
       startPlanePoint: hit.point.clone(),
+      faceCenter,
       pointerId: event.pointerId,
       previousControlsEnabled,
+      mode,
+      pullKind,
+      pullState
     };
 
     try {
@@ -132,8 +277,64 @@ export class ExtrudeTool {
   };
 
   private onPointerMove = (event: PointerEvent) => {
-    if (!this.enabled || !this.active) return;
+    if (!this.enabled) return;
+
+    if (!this.active) {
+      // Hover logic
+      const scene = this.options.getScene();
+      const candidates: THREE.Mesh[] = [];
+      scene.traverse((obj) => {
+        if ((obj as any).isMesh) {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.visible && !mesh.userData.isHelper) {
+            candidates.push(mesh);
+          }
+        }
+      });
+
+      const rect = this.container.getBoundingClientRect();
+      this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      this.raycaster.setFromCamera(this.mouse, this.getCamera());
+
+      const hits = this.raycaster.intersectObjects(candidates, true);
+
+      let hovered: THREE.Object3D | null = null;
+      let faceIndex: number | null = null;
+
+      for (const h of hits) {
+        const mesh = this.findExtrudableMesh(h.object);
+        if (mesh) {
+          hovered = mesh;
+          faceIndex = h.faceIndex ?? null;
+          break;
+        }
+      }
+      this.options.onHover?.(hovered, faceIndex);
+      return;
+    }
+
     if (event.pointerId !== this.active.pointerId) return;
+
+    // Pull Mode Logic
+    if (this.active.mode === 'pull' && this.active.pullState) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const state = this.active.pullState;
+      const dy = (state.startMouseY - event.clientY);
+      const scale = 0.05; // Sensitivity
+      let nextDepth = Math.max(0.01, this.active.startDepth + dy * scale);
+
+      // Update input value
+      state.inputEl.value = nextDepth.toFixed(3);
+
+      if (Math.abs(nextDepth - this.active.lastDepth) > 1e-4) {
+        this.updatePullGeometry(this.active.mesh, nextDepth, this.active.pullKind!, state);
+        this.active.lastDepth = nextDepth;
+      }
+      return;
+    }
 
     event.preventDefault();
     event.stopPropagation();
@@ -145,7 +346,68 @@ export class ExtrudeTool {
     const deltaAlongAxis = deltaVec.dot(this.active.axisVector);
     if (!Number.isFinite(deltaAlongAxis)) return;
 
-    const nextDepth = this.active.startDepth + deltaAlongAxis;
+    const nextDepthRaw = this.active.startDepth + deltaAlongAxis;
+
+    // Check for collisions/intersections in the direction of extrusion
+    // We raycast from the start point (or face center) in the direction of movement.
+    // Ideally, we check from the 'startPlanePoint' because that's where the user clicked/is looking.
+    let nextDepth = nextDepthRaw;
+
+    const direction = this.active.axisVector.clone();
+    // If deltaAlongAxis < 0, we are pulling "backwards" against the normal?
+    // Usually Extrude is along the normal (positive). If dragging opposite, it might be negative depth.
+    // Let's assume standard "positive is out".
+    const movingForward = deltaAlongAxis > 0;
+    const checkDir = direction.clone().multiplyScalar(movingForward ? 1 : -1);
+
+    // Raycast from the point on the face where we clicked.
+    // Offset slightly to avoid self-intersection with the starting face itself.
+    const rayOrigin = this.active.startPlanePoint.clone().add(checkDir.clone().multiplyScalar(0.01));
+    this.raycaster.set(rayOrigin, checkDir);
+
+    const scene = this.options.getScene();
+    const candidates: THREE.Object3D[] = [];
+    scene.traverse((obj) => {
+      if ((obj as any).isMesh && obj !== this.active!.mesh) {
+        // Exclude helpers/gizmos
+        if (obj.userData.isHelper) return;
+        if (!obj.visible) return;
+        candidates.push(obj);
+      }
+    });
+
+    const intersections = this.raycaster.intersectObjects(candidates, false);
+    if (intersections.length > 0) {
+      // Find the closest intersection
+      const hit = intersections[0];
+      // The distance is from rayOrigin.
+      // We really care about the projected distance along the axis.
+      // But since we raycast *along* the axis, the distance IS the delta.
+
+      // Max distance we *want* to go is the mouse cursor distance (deltaAlongAxis).
+      // If hit.distance is LESS than the requested mouse distance, we snap.
+
+      // Calculate the raw delta from start
+      const currentDeltaAbs = Math.abs(deltaAlongAxis);
+
+      // If the hit is within our drag range (plus a small threshold for "magnetic" snapping)
+      if (hit.distance < currentDeltaAbs + 0.2) {
+        // We found an obstacle. Snap to it.
+        // Allow snapping slightly *before* the mouse position if checking forward
+
+        // If we are pulling 5 units, and there is a wall at 3 units.
+        // hit.distance will be ~3.
+        // We should limit the delta to hit.distance.
+
+        const limit = hit.distance;
+        // Apply direction
+        const snappedDelta = movingForward ? limit : -limit;
+
+        // Update nextDepth
+        nextDepth = this.active.startDepth + snappedDelta;
+      }
+    }
+
     const hollow = event.altKey === true;
 
     const depthChanged = Math.abs(nextDepth - this.active.lastDepth) > 1e-4;
@@ -198,6 +460,11 @@ export class ExtrudeTool {
       options.releaseTarget?.releasePointerCapture?.(state.pointerId);
     } catch {
       // ignore
+    }
+
+    // Cleanup Input
+    if (state.pullState?.inputEl) {
+      state.pullState.inputEl.remove();
     }
 
     const controls = this.options.getControls?.() ?? null;
@@ -377,5 +644,50 @@ export class ExtrudeTool {
     mesh.add(helper);
     ud.__extrudeEdges = helper;
     mesh.userData = ud;
+  }
+
+  private updatePullGeometry(mesh: THREE.Mesh, depth: number, kind: string, state: any) {
+    let newGeom: THREE.BufferGeometry | null = null;
+    if (kind === 'rect' && state.center && state.width != null && state.length != null) {
+      const shape = new THREE.Shape();
+      shape.moveTo(-state.width / 2, -state.length / 2);
+      shape.lineTo(state.width / 2, -state.length / 2);
+      shape.lineTo(state.width / 2, state.length / 2);
+      shape.lineTo(-state.width / 2, state.length / 2);
+      shape.lineTo(-state.width / 2, -state.length / 2);
+      const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+      g.rotateX(-Math.PI / 2);
+      g.translate(state.center.x, 0, state.center.z);
+      newGeom = g;
+    } else if (kind === 'circle' && state.center && state.radius != null) {
+      const s = new THREE.Shape();
+      s.absarc(0, 0, state.radius, 0, Math.PI * 2, false);
+      const g = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false, curveSegments: 48 });
+      g.rotateX(-Math.PI / 2);
+      g.translate(state.center.x, 0, state.center.z);
+      newGeom = g;
+    } else if (kind === 'poly' && state.vertices) {
+      const s = new THREE.Shape(state.vertices.map((v: any) => new THREE.Vector2(v.x, v.z)));
+      const g = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false });
+      g.rotateX(-Math.PI / 2);
+      // center computation might be needed if original pivot wasn't 0,0?
+      // The provided code did:
+      const cx = state.vertices.reduce((sum: number, v: any) => sum + v.x, 0) / state.vertices.length;
+      const cz = state.vertices.reduce((sum: number, v: any) => sum + v.z, 0) / state.vertices.length;
+      g.translate(cx, 0, cz);
+      newGeom = g;
+    }
+
+    if (newGeom) {
+      const old = mesh.geometry;
+      mesh.geometry = newGeom;
+      if (old !== this.active?.originalGeometry) {
+        old.dispose();
+      }
+      const ud: any = mesh.userData || {};
+      ud.depth = depth;
+      ud.isExtruded = true;
+      mesh.userData = ud;
+    }
   }
 }
