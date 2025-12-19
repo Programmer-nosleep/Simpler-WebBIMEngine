@@ -1,6 +1,7 @@
 import './style.css'
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+
 import { SkyDomeHelper, SkyDomeUI } from '../helpers/skydome';
 import { setupFaceSelection } from "../components/FaceSelection";
 import { AxesGizmo } from "../components/Gizmo";
@@ -112,6 +113,13 @@ const init = async () => {
 	// 11. Setup IFC Manager
 	try {
 		const components = new OBC.Components();
+
+		// FIX: Inject existing scene context into OBC Components
+		// OBC tools often expect components.scene/camera/renderer to exist.
+		(components as any).scene = { get: () => cameraScene.scene };
+		(components as any).camera = { get: () => cameraScene.camera.three };
+		(components as any).renderer = { get: () => cameraScene.world.renderer };
+
 		const ifcManager = new IfcManager(components);
 		await ifcManager.setup();
 		ifcManager.setupImporter("importer", cameraScene.scene);
@@ -126,6 +134,11 @@ const setupGizmo = (container: HTMLElement, cameraScene: any) => {
 	const gizmoCanvas = document.createElement("canvas");
 	gizmoCanvas.classList.add("axes-gizmo");
 	gizmoCanvas.setAttribute("aria-label", "camera axes gizmo");
+	// Pastikan gizmo tidak menutupi seluruh layar (blocking events)
+	gizmoCanvas.style.position = "absolute";
+	gizmoCanvas.style.top = "10px";
+	gizmoCanvas.style.right = "10px";
+	gizmoCanvas.style.zIndex = "100";
 	container.appendChild(gizmoCanvas);
 
 	const axesGizmo = new AxesGizmo(
@@ -150,10 +163,18 @@ const setupGizmo = (container: HTMLElement, cameraScene: any) => {
 
 const setupEnvironment = (cameraScene: any) => {
 	setupGrid(cameraScene, { yOffset: -0.5 });
+	// Non-aktifkan raycasting pada GridHelper agar tidak mengganggu Orbit
+	cameraScene.scene.traverse((child: any) => {
+		if (child.isGridHelper) child.raycast = () => {};
+	});
 
 	// Axes World Setup
 	const axesWorld = new AxesWorld();
 	axesWorld.position.y = -0.5;
+	// Non-aktifkan raycasting pada AxesWorld agar tidak mengganggu Orbit/Line tool
+	axesWorld.traverse((child) => {
+		child.raycast = () => {};
+	});
 	cameraScene.scene.add(axesWorld);
 
 	// SkyDome Setup
@@ -438,7 +459,8 @@ const setupDockSystem = async (
 		faceSelection.setSelectionByNormal(null);
 
 		if (tool === "select") {
-			selectionSystem.selectionMarquee.enable();
+			// Jangan enable marquee secara langsung agar tidak memblokir Orbit
+			// selectionSystem.selectionMarquee.enable();
 			selectionSystem.syncFaceSelection();
 		} else if (tool === "line") {
 			lineTool.enable();
@@ -450,38 +472,61 @@ const setupDockSystem = async (
 	const dock = await setupDock({
 		initialTool: "select",
 		onToolChange: (tool) => {
+			updateSelectionState(tool);
+
+			const controls = cameraScene.camera.controls;
 			if (tool === "hand") {
-				cameraScene.setNavigationMode("Plan");
+				// Mode Hand: Pan dengan Left Click, tetap di Orbit (Perspective) agar bisa rotate via Right Click
+				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.PAN;
+					controls.mouseButtons.right = THREE.MOUSE.ROTATE;
+				}
 			} else if (tool === "select") {
 				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+					controls.mouseButtons.right = THREE.MOUSE.PAN;
+				}
 			} else if (tool === "line") {
 				// cameraScene.setNavigationMode("Plan");
 			} else if (tool === "move") {
 				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+					controls.mouseButtons.right = THREE.MOUSE.PAN;
+				}
 			}
-			updateSelectionState(tool);
 		},
 	});
 
+	cameraScene.setNavigationMode("Orbit");
 	updateSelectionState("select");
 
 	cameraScene.onNavigationModeChanged((mode: string) => {
 		if (mode === "Plan" && selectionSystem.currentTool !== "hand") {
 			dock.setActiveTool("hand", { silent: true });
 			updateSelectionState("hand");
-		} else if (mode !== "Plan" && selectionSystem.currentTool === "hand") {
-			dock.setActiveTool("select", { silent: true });
-			updateSelectionState("select");
 		}
 	});
 
 	window.addEventListener("keydown", (event) => {
+		// Aktifkan Marquee hanya saat Shift ditekan dalam mode Select
+		if (event.key === "Shift" && selectionSystem.currentTool === "select") {
+			selectionSystem.selectionMarquee.enable();
+		}
 		if (event.key === "Escape") {
 			if (selectionSystem.currentTool !== "select") {
 				dock.setActiveTool("select");
 			} else {
 				selectionSystem.clearSelection();
 			}
+		}
+	});
+
+	window.addEventListener("keyup", (event) => {
+		if (event.key === "Shift") {
+			selectionSystem.selectionMarquee.disable();
 		}
 	});
 };

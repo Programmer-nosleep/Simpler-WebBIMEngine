@@ -6,10 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simpler - BIMEngine</title>
   </head>
+
   <body>
     <div id="threejs"></div>
+
+    <!-- TOPBAR (NAVBAR PANELS) -->
     <div id="ui-floating">
       <div id="ui-panels">
+        <!-- Camera -->
         <div class="control-panel">
           <label for="projectionMode">Camera</label>
           <div class="control-row">
@@ -20,6 +24,8 @@
             <button id="projectionToggle" type="button">Toggle</button>
           </div>
         </div>
+
+        <!-- Navigation -->
         <div class="control-panel">
           <label for="navigationMode">Navigation</label>
           <div class="control-row">
@@ -29,24 +35,8 @@
             </select>
           </div>
         </div>
-        <!-- <div class="control-panel section-panel">
-          <div class="control-row section-form">
-            <label for="sectionName">Section</label>
-            <input id="sectionName" type="text" placeholder="Section A" />
-            <label for="sectionHeightInput">Height</label>
-            <input
-              id="sectionHeightInput"
-              type="number"
-              step="0.1"
-              value="0"
-            />
-            <button id="sectionAddBtn" type="button">Add</button>
-          </div>
-          <label class="section-visibility">
-            <input type="checkbox" id="sectionBoxToggle" checked />
-            Show box
-          </label>
-        </div> -->
+
+        <!-- Import (option GLB/OBJ/IFC) -->
         <div class="control-panel">
           <label for="importerFormat">Import</label>
           <div class="control-row">
@@ -55,13 +45,17 @@
               <option value="obj">OBJ</option>
               <option value="ifc">IFC</option>
             </select>
-            <!-- tetap pakai id="importer" biar code kamu yang sudah ada nggak rusak -->
             <input type="file" id="importer" />
           </div>
         </div>
       </div>
-      <aside id="leftSidebar" aria-label="Project views sidebar"></aside>
     </div>
+
+    <!-- SIDEBAR TERPISAH -->
+    <aside id="ui-sidebar" aria-label="Project views sidebar wrapper">
+      <aside id="leftSidebar" aria-label="Project views sidebar"></aside>
+    </aside>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

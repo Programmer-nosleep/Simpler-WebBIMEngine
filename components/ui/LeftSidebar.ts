@@ -46,10 +46,19 @@ type SidebarSection = {
 function ensureContainer(root?: HTMLElement): HTMLElement {
   if (root) return root;
   const existing = document.getElementById("leftSidebar");
-  if (existing) return existing;
-  const container = document.createElement("aside");
-  container.id = "leftSidebar";
-  document.body.appendChild(container);
+  const container = existing || document.createElement("aside");
+
+  if (!existing) {
+    container.id = "leftSidebar";
+    document.body.appendChild(container);
+  }
+
+  // Pastikan posisi sidebar ada di bawah panel atas (floating UI)
+  container.style.position = "fixed";
+  container.style.top = "80px";
+  container.style.left = "12px";
+  container.style.marginTop = "0";
+
   return container;
 }
 

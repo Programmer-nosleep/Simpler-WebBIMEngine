@@ -13,8 +13,20 @@ type SelectionMarqueeOptions = {
 };
 
 export function createSelectionMarquee(container: HTMLElement, options: SelectionMarqueeOptions = {}) {
+  // Pastikan container memiliki positioning context agar absolute positioning marquee akurat
+  if (window.getComputedStyle(container).position === "static") {
+    container.style.position = "relative";
+  }
+
   const overlay = document.createElement("div");
   overlay.className = "selection-marquee";
+  // Tambahkan default styles agar terlihat tanpa perlu file CSS eksternal
+  overlay.style.position = "absolute";
+  overlay.style.border = "1px solid #4f8cff";
+  overlay.style.backgroundColor = "rgba(79, 140, 255, 0.2)";
+  overlay.style.pointerEvents = "none"; // Agar tidak memblokir event mouseup
+  overlay.style.zIndex = "10000"; // Pastikan di atas canvas
+  overlay.style.display = "none";
   container.appendChild(overlay);
 
   let isEnabled = false;

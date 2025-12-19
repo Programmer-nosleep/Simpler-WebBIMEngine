@@ -104,24 +104,18 @@ export class SkyDomeUI {
     
     this.container = document.createElement("div");
     this.container.className = "control-panel";
-    this.container.style.marginTop = "0";
 
     // Cari container UI utama
     const uiFloating = document.getElementById("ui-floating");
     let uiPanels = document.getElementById("ui-panels");
 
     if (uiFloating) {
-      // Jika ui-panels belum ada, buat dan taruh di paling atas (sebelum leftSidebar)
+      // Jika ui-panels belum ada, buat dan taruh di paling atas
       if (!uiPanels) {
         uiPanels = document.createElement("div");
         uiPanels.id = "ui-panels";
-        if (uiFloating.firstChild) {
-            uiFloating.insertBefore(uiPanels, uiFloating.firstChild);
-        } else {
-            uiFloating.appendChild(uiPanels);
-        }
+        uiFloating.prepend(uiPanels);
       }
-      // Append ke ui-panels agar sejajar/menumpuk dengan kontrol lain
       uiPanels.appendChild(this.container);
     } else {
       // Fallback jika struktur HTML tidak ditemukan
@@ -129,7 +123,6 @@ export class SkyDomeUI {
       this.container.style.position = "fixed";
       this.container.style.top = "12px";
       this.container.style.left = "12px";
-      this.container.style.width = "300px";
       this.container.style.zIndex = "100";
     }
 
@@ -143,11 +136,7 @@ export class SkyDomeUI {
     this.container.appendChild(label);
 
     const controls = document.createElement("div");
-    controls.className = "section-controls";
-    controls.style.display = "flex";
-    controls.style.alignItems = "center";
-    controls.style.gap = "8px";
-    controls.style.flex = "1";
+    controls.className = "timeline-row";
 
     const slider = document.createElement("input");
     slider.type = "range";
@@ -155,7 +144,6 @@ export class SkyDomeUI {
     slider.max = "22";
     slider.step = "0.05";
     slider.value = "6";
-    slider.style.flex = "1";
     
     slider.oninput = (e: Event) => {
       const val = parseFloat((e.target as HTMLInputElement).value);
@@ -164,10 +152,7 @@ export class SkyDomeUI {
     controls.appendChild(slider);
 
     this.timeLabel = document.createElement("span");
-    this.timeLabel.style.fontSize = "12px";
-    this.timeLabel.style.fontVariantNumeric = "tabular-nums";
-    this.timeLabel.style.minWidth = "40px";
-    this.timeLabel.style.textAlign = "right";
+    // Style font-size dan min-width sudah dihandle oleh CSS .timeline-row span
     controls.appendChild(this.timeLabel);
 
     this.container.appendChild(controls);
