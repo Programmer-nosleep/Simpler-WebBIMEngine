@@ -22,6 +22,7 @@ export class SnappingHelper {
   private container: HTMLElement;
   private raycaster: THREE.Raycaster;
   private snapThreshold: number;
+  private meshEdgesCache = new WeakMap<THREE.BufferGeometry, Map<number, THREE.EdgesGeometry>>();
 
   constructor(
     scene: THREE.Scene,
@@ -37,55 +38,111 @@ export class SnappingHelper {
     this.snapThreshold = snapThreshold;
   }
 
-  public getBestSnap(hit: THREE.Vector3, currentPoints: THREE.Vector3[]): SnapResult | null {
+  private getMeshEdgesGeometry(geometry: THREE.BufferGeometry, thresholdAngle: number) {
+    let byThreshold = this.meshEdgesCache.get(geometry);
+    if (!byThreshold) {
+      byThreshold = new Map();
+      this.meshEdgesCache.set(geometry, byThreshold);
+    }
+
+    const cached = byThreshold.get(thresholdAngle);
+    if (cached) return cached;
+
+    const edges = new THREE.EdgesGeometry(geometry, thresholdAngle);
+    byThreshold.set(thresholdAngle, edges);
+    return edges;
+  }
+
+  public getBestSnap(
+    hit: THREE.Vector3,
+    currentPoints: THREE.Vector3[],
+    options?: { ignoreIds?: Set<number>; meshEdgeThresholdAngle?: number }
+  ): SnapResult | null {
     let best: SnapResult | null = null;
-    const consider = (res: SnapResult) => {
-        if (!best || res.dist < best.dist) best = res;
-    };
+    const ignoreIds = options?.ignoreIds;
+    const meshEdgeThresholdAngle = options?.meshEdgeThresholdAngle ?? 25;
 
-    // Helper: Check points
-    const checkPoints = (pts: THREE.Vector3[]) => {
-      for (let i = 0; i < pts.length; i++) {
-          const p = pts[i];
-          const d = hit.distanceTo(p);
-          if (d < this.snapThreshold) {
-              consider({ kind: "endpoint", point: p, dist: d });
-          }
+    const considerPoint = (kind: SnapKind, pointWorld: THREE.Vector3) => {
+      const dist = hit.distanceTo(pointWorld);
+      if (dist >= this.snapThreshold) return;
 
-          // Midpoint
-          if (i < pts.length - 1) {
-              const mid = new THREE.Vector3().addVectors(pts[i], pts[i+1]).multiplyScalar(0.5);
-              const dMid = hit.distanceTo(mid);
-              if (dMid < this.snapThreshold) {
-                  consider({ kind: "midpoint", point: mid, dist: dMid });
-              }
-          }
+      if (!best || dist < best.dist) {
+        best = { kind, point: pointWorld.clone(), dist };
       }
     };
 
-    // 1. Check current drawing points
-    checkPoints(currentPoints);
+    const line3 = new THREE.Line3();
+    const closest = new THREE.Vector3();
 
-    // 2. Check scene lines (simplified)
-    this.scene.traverse((obj) => {
-        if ((obj as any).isLine && !(obj as any).userData.isHelper) {
-            const line = obj as THREE.Line;
-            const geom = line.geometry;
-            if (geom instanceof THREE.BufferGeometry) {
-                const pos = geom.attributes.position;
-                if (pos) {
-                    const pts: THREE.Vector3[] = [];
-                    for(let i=0; i<pos.count; i++) {
-                        pts.push(
-                          new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(
-                            line.matrixWorld
-                          )
-                        );
-                    }
-                    checkPoints(pts);
-                }
-            }
+    const addSegment = (a: THREE.Vector3, b: THREE.Vector3) => {
+      considerPoint("endpoint", a);
+      considerPoint("endpoint", b);
+      considerPoint("midpoint", a.clone().add(b).multiplyScalar(0.5));
+
+      line3.set(a, b);
+      line3.closestPointToPoint(hit, true, closest);
+      considerPoint("onEdge", closest);
+    };
+
+    const checkSegments = (pts: THREE.Vector3[], isLineSegments: boolean) => {
+      if (pts.length < 2) return;
+      if (isLineSegments) {
+        for (let i = 0; i < pts.length - 1; i += 2) {
+          addSegment(pts[i], pts[i + 1]);
         }
+      } else {
+        for (let i = 0; i < pts.length - 1; i++) {
+          addSegment(pts[i], pts[i + 1]);
+        }
+      }
+    };
+
+    // 1) Current drawing points
+    checkSegments(currentPoints, false);
+
+    // 2) Scene geometry (lines + meshes)
+    this.scene.traverse((obj) => {
+      if ((obj as any).userData.isHelper) return;
+      if (ignoreIds?.has(obj.id)) return;
+      if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).isGridHelper) return;
+
+      if ((obj as any).isLine) {
+        const line = obj as THREE.Line;
+        const geom = line.geometry;
+        if (!(geom instanceof THREE.BufferGeometry)) return;
+
+        const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
+
+        const pts: THREE.Vector3[] = [];
+        for (let i = 0; i < pos.count; i++) {
+          pts.push(
+            new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(line.matrixWorld)
+          );
+        }
+
+        checkSegments(pts, (line as any).isLineSegments === true);
+        return;
+      }
+
+      if ((obj as any).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        const geom = mesh.geometry;
+        if (!(geom instanceof THREE.BufferGeometry)) return;
+        if (!geom.getAttribute("position")) return;
+
+        const edgesGeom = this.getMeshEdgesGeometry(geom, meshEdgeThresholdAngle);
+        const pos = edgesGeom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
+
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        for (let i = 0; i < pos.count - 1; i += 2) {
+          a.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
+          b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1)).applyMatrix4(mesh.matrixWorld);
+          addSegment(a, b);
+        }
+      }
     });
 
     return best;
@@ -94,11 +151,14 @@ export class SnappingHelper {
   public getBestSnapByScreen(
     mouseScreen: THREE.Vector2,
     currentPoints: THREE.Vector3[],
-    snapPixels: number
+    snapPixels: number,
+    options?: { ignoreIds?: Set<number>; meshEdgeThresholdAngle?: number }
   ): SnapResult | null {
     const camera = this.getCamera();
     const rect = this.container.getBoundingClientRect();
     let best: SnapResult | null = null;
+    const ignoreIds = options?.ignoreIds;
+    const meshEdgeThresholdAngle = options?.meshEdgeThresholdAngle ?? 25;
 
     const edgeKeyEps = 1e-6;
     const quant = (n: number) => Math.round(n / edgeKeyEps);
@@ -154,22 +214,22 @@ export class SnappingHelper {
       }
     };
 
+    const pointOnRay = new THREE.Vector3();
+    const pointOnSegment = new THREE.Vector3();
+
+    const addSegment = (a: THREE.Vector3, b: THREE.Vector3) => {
+      const edge = { a, b };
+      considerPoint("endpoint", a, edge);
+      considerPoint("endpoint", b, edge);
+      considerPoint("midpoint", a.clone().add(b).multiplyScalar(0.5), edge);
+
+      // "On edge" inference (closest point on segment to the current ray).
+      // Requires `this.raycaster` to already be set up by the caller.
+      this.raycaster.ray.distanceSqToSegment(a, b, pointOnRay, pointOnSegment);
+      considerPoint("onEdge", pointOnSegment, edge);
+    };
+
     const checkSegments = (pts: THREE.Vector3[], isLineSegments: boolean) => {
-      const pointOnRay = new THREE.Vector3();
-      const pointOnSegment = new THREE.Vector3();
-
-      const addSegment = (a: THREE.Vector3, b: THREE.Vector3) => {
-        const edge = { a, b };
-        considerPoint("endpoint", a, edge);
-        considerPoint("endpoint", b, edge);
-        considerPoint("midpoint", a.clone().add(b).multiplyScalar(0.5), edge);
-
-        // "On edge" inference (closest point on segment to the current ray).
-        // Requires `this.raycaster` to already be set up by the caller.
-        this.raycaster.ray.distanceSqToSegment(a, b, pointOnRay, pointOnSegment);
-        considerPoint("onEdge", pointOnSegment, edge);
-      };
-
       if (pts.length < 2) return;
       if (isLineSegments) {
         for (let i = 0; i < pts.length - 1; i += 2) {
@@ -185,24 +245,47 @@ export class SnappingHelper {
     checkSegments(currentPoints, false);
 
     this.scene.traverse((obj) => {
+      if (ignoreIds?.has(obj.id)) return;
       if ((obj as any).userData.isHelper) return;
-      if (!(obj as any).isLine) return;
+      if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).isGridHelper) return;
 
-      const line = obj as THREE.Line;
-      const geom = line.geometry;
-      if (!(geom instanceof THREE.BufferGeometry)) return;
+      if ((obj as any).isLine) {
+        const line = obj as THREE.Line;
+        const geom = line.geometry;
+        if (!(geom instanceof THREE.BufferGeometry)) return;
 
-      const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
-      if (!pos) return;
+        const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
 
-      const pts: THREE.Vector3[] = [];
-      for (let i = 0; i < pos.count; i++) {
-        pts.push(
-          new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(line.matrixWorld)
-        );
+        const pts: THREE.Vector3[] = [];
+        for (let i = 0; i < pos.count; i++) {
+          pts.push(
+            new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(line.matrixWorld)
+          );
+        }
+
+        checkSegments(pts, (line as any).isLineSegments === true);
+        return;
       }
 
-      checkSegments(pts, (line as any).isLineSegments === true);
+      if ((obj as any).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        const geom = mesh.geometry;
+        if (!(geom instanceof THREE.BufferGeometry)) return;
+        if (!geom.getAttribute("position")) return;
+
+        const edgesGeom = this.getMeshEdgesGeometry(geom, meshEdgeThresholdAngle);
+        const pos = edgesGeom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
+
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        for (let i = 0; i < pos.count - 1; i += 2) {
+          a.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
+          b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1)).applyMatrix4(mesh.matrixWorld);
+          addSegment(a, b);
+        }
+      }
     });
 
     return best;
@@ -211,7 +294,7 @@ export class SnappingHelper {
   public getClosestPointOnAxis(origin: THREE.Vector3, axisDir: THREE.Vector3, mouseScreen: THREE.Vector2) {
     const ray = this.raycaster.ray;
     const dirNorm = axisDir.clone().normalize();
-    
+
     const w0 = new THREE.Vector3().subVectors(ray.origin, origin);
     const a = ray.direction.dot(dirNorm);
     const b = ray.direction.dot(w0);
@@ -220,19 +303,56 @@ export class SnappingHelper {
 
     let t = 0;
     if (d > 1e-6) {
-        t = (c - a * b) / d;
+      t = (c - a * b) / d;
     }
     const pointOnAxis = origin.clone().addScaledVector(dirNorm, t);
-    
+
     // Project to screen to check pixel distance
     const camera = this.getCamera();
     const pScreen = pointOnAxis.clone().project(camera);
     const rect = this.container.getBoundingClientRect();
     const x = (pScreen.x * 0.5 + 0.5) * rect.width;
     const y = (-pScreen.y * 0.5 + 0.5) * rect.height;
-    
+
     const distPixels = Math.hypot(x - mouseScreen.x, y - mouseScreen.y);
 
     return { point: pointOnAxis, distPixels };
+  }
+
+  public getSceneVertices(options?: { ignoreIds?: Set<number>; limit?: number }): THREE.Vector3[] {
+    const vertices: THREE.Vector3[] = [];
+    const ignoreIds = options?.ignoreIds;
+    const limit = options?.limit ?? 1000;
+
+    this.scene.traverse((obj) => {
+      if (vertices.length >= limit) return;
+      if (ignoreIds?.has(obj.id)) return;
+      if ((obj as any).userData.isHelper) return;
+      if (obj.name === "SkyDome" || obj.name === "Grid" || (obj as any).isGridHelper) return;
+
+      const processGeom = (geom: THREE.BufferGeometry, matrix: THREE.Matrix4) => {
+        const pos = geom.getAttribute("position");
+        if (!pos) return;
+        // Stride 3? Just take all?
+        // For optimization, maybe just take corners? 
+        // But for general mesh, all vertices are potential snap points.
+        // Let's deduplicate locally?
+        for (let i = 0; i < pos.count; i++) {
+          if (vertices.length >= limit) return;
+          const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(matrix);
+          vertices.push(v);
+        }
+      };
+
+      if ((obj as any).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        processGeom(mesh.geometry, mesh.matrixWorld);
+      } else if ((obj as any).isLine) {
+        const line = obj as THREE.Line;
+        processGeom(line.geometry, line.matrixWorld);
+      }
+    });
+
+    return vertices;
   }
 }

@@ -41,6 +41,7 @@ export class LineTool {
   private tempVec3 = new THREE.Vector3();
   private tempVec3b = new THREE.Vector3();
   private createdFaceHashes = new Set<string>();
+  private meshEdgesCache = new WeakMap<THREE.BufferGeometry, Map<number, THREE.EdgesGeometry>>();
 
   // Constants
   private readonly SNAP_THRESHOLD = 0.3;
@@ -135,8 +136,7 @@ export class LineTool {
     this.axisGuides = [];
     this.snapGuides = null;
     this.snapGuideLines = [];
-    this.edgeGuide = null;
-    this.intersectionGuide.update(null);
+
   }
 
   // --- Event Handlers ---
@@ -157,6 +157,7 @@ export class LineTool {
     let intersectionResult: IntersectionResult | null = null;
 
     // 1. Snap ke Geometri (Endpoint/Midpoint)
+    // Gunakan threshold angle rendah (1 derajat) untuk mendeteksi semua edge yang signifikan
     const rect = this.container.getBoundingClientRect();
     const mouseScreen = new THREE.Vector2(
       e.clientX - rect.left,
@@ -165,7 +166,8 @@ export class LineTool {
     const snapResult = this.snappingHelper.getBestSnapByScreen(
       mouseScreen,
       this.points,
-      this.AXIS_SNAP_PIXELS
+      this.AXIS_SNAP_PIXELS,
+      { meshEdgeThresholdAngle: 1 }
     );
     if (snapResult) {
       target.copy(snapResult.point);
@@ -178,13 +180,16 @@ export class LineTool {
       const last = this.points[this.points.length - 1];
       const start = this.points[0];
 
+      // Collect points from OTHER meshes in the scene for inference
+      const scenePoints = this.snappingHelper.getSceneVertices({ limit: 200, ignoreIds: new Set(this.points.map(() => -1)) });
+      const allCandidates = [...this.points, ...scenePoints];
+
       // Dual Axis Snap (Intersection)
-      // Check references from all previous points
       let dualSnap: THREE.Vector3 | null = null;
-      if (this.points.length >= 2) {
+      if (allCandidates.length >= 2) {
         const result = this.intersectionHelper.getBestIntersection(
           last,
-          this.points,
+          allCandidates,
           mouseScreen,
           this.AXIS_SNAP_PIXELS
         );
@@ -197,7 +202,7 @@ export class LineTool {
         }
       }
 
-      // Single Axis Snap (fallback if no dual snap)
+      // Single Axis Snap
       if (!dualSnap) {
         const axes = [
           { name: "x" as const, dir: new THREE.Vector3(1, 0, 0) },
@@ -207,73 +212,93 @@ export class LineTool {
 
         let bestDist = this.AXIS_SNAP_PIXELS;
         let bestPoint: THREE.Vector3 | null = null;
+        let bestAxis: { name: "x" | "y" | "z", dir: THREE.Vector3 } | null = null;
 
-        // Check alignment with LAST point
         for (const ax of axes) {
           const info = this.snappingHelper.getClosestPointOnAxis(last, ax.dir, mouseScreen);
           if (info.distPixels < bestDist) {
             bestDist = info.distPixels;
             bestPoint = info.point;
+            bestAxis = ax;
             snappedAxis = ax.name;
             snappedEdgeDir = null;
             axisSnapLines = [{ axis: ax.name, origin: last }];
           }
         }
 
-        // Check alignment with START point (if not aligned with last)
-        // Note: If you want to allow snapping to start point INSTEAD of last point, check here.
-        // But usually Last point has priority or we check both and take closest.
-        // For now let's prioritize Last point for single axis snap to avoid jumping too much,
-        // unless we want to treat them equally.
         if (!bestPoint && this.points.length > 1) {
           for (const ax of axes) {
             const info = this.snappingHelper.getClosestPointOnAxis(start, ax.dir, mouseScreen);
             if (info.distPixels < bestDist) {
               bestDist = info.distPixels;
               bestPoint = info.point;
-              snappedAxis = ax.name; // Use same visual style
+              bestAxis = ax;
+              snappedAxis = ax.name;
               snappedEdgeDir = null;
               axisSnapLines = [{ axis: ax.name, origin: start }];
             }
           }
         }
 
-        if (bestPoint) {
+        if (bestPoint && bestAxis) {
           target.copy(bestPoint);
+
+          // Raycast axis intersection against scene meshes
+          const rayOrigin = axisSnapLines[0].origin;
+          const rayDir = bestAxis.dir.clone();
+
+          this.raycaster.set(rayOrigin, rayDir);
+          const hitsPos = this.raycaster.intersectObjects(this.scene.children, true);
+
+          this.raycaster.set(rayOrigin, rayDir.negate());
+          const hitsNeg = this.raycaster.intersectObjects(this.scene.children, true);
+
+          const validHits = [...hitsPos, ...hitsNeg].filter(h => {
+            if (h.object.userData.isHelper) return false;
+            if (h.object.name === "Grid" || h.object.name === "SkyDome") return false;
+            if ((h.object as any).isLine) return false;
+            return true;
+          });
+
+          let bestHitDist = Infinity;
+          let bestHitPoint: THREE.Vector3 | null = null;
+
+          for (const h of validHits) {
+            const d = h.point.distanceTo(bestPoint);
+            if (d < 0.5) {
+              if (d < bestHitDist) {
+                bestHitDist = d;
+                bestHitPoint = h.point;
+              }
+            }
+          }
+
+          if (bestHitPoint) {
+            target.copy(bestHitPoint);
+          }
         }
       }
 
       if (!dualSnap && !snappedAxis) {
-        // Edge Locking from Last Point (if no axis snap)
         for (const dir of this.edgeLockDirs) {
           const info = this.snappingHelper.getClosestPointOnAxis(last, dir, mouseScreen);
           if (info.distPixels < this.AXIS_SNAP_PIXELS) {
-            // bestDist check omitted for simplicity but valid
             target.copy(info.point);
             snappedAxis = null;
             snappedEdgeDir = dir;
-            axisSnapLines = []; // Clear axis guides if edge locked
+            axisSnapLines = [];
           }
         }
       }
     }
 
-    // Update Visuals
     this.updateConnectorDot(target, snapResult?.kind);
     this.updateSnapGuides(snapResult);
-
-    // Update multiple axis guides
-    // Only show helper axis guides when doing an "intersection" snap (dual axis),
-    // to avoid noisy guide lines during normal drawing.
     this.updateAxisGuides(axisSnapLines.length > 1 ? axisSnapLines : []);
-
     this.updateEdgeGuide(snappedEdgeDir, this.points[this.points.length - 1]);
     this.intersectionGuide.update(intersectionResult);
-    this.updatePreviewLine(target);
-
+    this.updatePreviewLine(target); // Note: updatePreviewLine might need 'target' logic for axis lines? No, it just draws to target.
     if (this.points.length > 0) {
-      // Pass empty string for axis if we have a custom label like "Intersection" logic in updateAxisInfo needs adjustment?
-      // Actually updateAxisInfo takes (last, curr, axis). We can hack axis string.
       const lockLabel = snappedAxis ? `Axis: ${snappedAxis.toUpperCase()}` : (snappedEdgeDir ? "Edge" : (axisSnapLines.length > 1 ? "Intersection" : null));
       this.updateAxisInfo(this.points[this.points.length - 1], target, lockLabel);
     }
@@ -337,6 +362,12 @@ export class LineTool {
     this.edgeLockDirs = nextEdgeLockDirs;
     // Keep the active plane passing through the latest point (SketchUp-like).
     this.plane.constant = -this.plane.normal.dot(target);
+
+    // Buat bidang (face) langsung ketika edge baru membentuk loop dengan edge lain
+    // (termasuk edge yang berasal dari mesh yang sudah ada).
+    if (this.points.length >= 2) {
+      this.tryAutoCreateFaces({ includeMeshEdges: true, extraPolyline: this.points });
+    }
 
     if (this.points.length === 1) {
       this.showInputOverlay(e.clientX, e.clientY);
@@ -532,16 +563,46 @@ export class LineTool {
       new THREE.LineBasicMaterial({ color: 0x000000, depthWrite: false })
     );
     outline.userData.selectable = false;
+    outline.userData.isFaceOutline = true;
     outline.renderOrder = 1;
     outline.position.z += this.SURFACE_OFFSET;
     mesh.add(outline);
+    (mesh.userData as any).__faceOutline = outline;
 
     return mesh;
   }
 
-  private tryAutoCreateFaces() {
+  private getMeshEdgesGeometry(geometry: THREE.BufferGeometry, thresholdAngle: number) {
+    let byThreshold = this.meshEdgesCache.get(geometry);
+    if (!byThreshold) {
+      byThreshold = new Map();
+      this.meshEdgesCache.set(geometry, byThreshold);
+    }
+
+    const cached = byThreshold.get(thresholdAngle);
+    if (cached) return cached;
+
+    const edges = new THREE.EdgesGeometry(geometry, thresholdAngle);
+    byThreshold.set(thresholdAngle, edges);
+    return edges;
+  }
+
+  private tryAutoCreateFaces(options?: {
+    plane?: THREE.Plane;
+    includeMeshEdges?: boolean;
+    meshEdgeThresholdAngle?: number;
+    extraPolyline?: THREE.Vector3[];
+  }) {
     type Edge = { a: number; b: number };
     type PlaneInfo = { normal: THREE.Vector3; origin: THREE.Vector3 };
+
+    const planeFilter = options?.plane;
+    const includeMeshEdges = options?.includeMeshEdges ?? false;
+    const meshEdgeThresholdAngle = options?.meshEdgeThresholdAngle ?? 25;
+    const extraPolyline = options?.extraPolyline;
+
+    // Ensure matrixWorld is up to date before sampling lines/meshes.
+    this.scene.updateMatrixWorld(true);
 
     // Include:
     // - user-drawn lines (selectable === true)
@@ -581,6 +642,7 @@ export class LineTool {
       }
     });
 
+    const planeDistEps = 1e-3;
     const keyEps = 1e-3;
     const quant = (n: number) => Math.round(n / keyEps);
     const keyOf = (v: THREE.Vector3) => `${quant(v.x)},${quant(v.y)},${quant(v.z)}`;
@@ -591,6 +653,7 @@ export class LineTool {
     const adjacency: number[][] = [];
     const edges: Edge[] = [];
     const edgeSet = new Set<string>();
+    const userEdgeSet = new Set<string>();
 
     const getIndex = (p: THREE.Vector3) => {
       const k = keyOf(p);
@@ -604,16 +667,30 @@ export class LineTool {
       return index;
     };
 
-    const addEdge = (a: number, b: number) => {
+    const addEdge = (a: number, b: number, markUser: boolean) => {
       if (a === b) return;
       const min = Math.min(a, b);
       const max = Math.max(a, b);
       const edgeKey = `${min}|${max}`;
+      if (markUser) userEdgeSet.add(edgeKey);
       if (edgeSet.has(edgeKey)) return;
       edgeSet.add(edgeKey);
       edges.push({ a: min, b: max });
       adjacency[a].push(b);
       adjacency[b].push(a);
+    };
+
+    const includeSegment = (
+      aWorld: THREE.Vector3,
+      bWorld: THREE.Vector3,
+      source: "user" | "mesh"
+    ) => {
+      if (planeFilter) {
+        if (Math.abs(planeFilter.distanceToPoint(aWorld)) >= planeDistEps) return;
+        if (Math.abs(planeFilter.distanceToPoint(bWorld)) >= planeDistEps) return;
+      }
+
+      addEdge(getIndex(aWorld), getIndex(bWorld), source === "user");
     };
 
     const addSegmentsFromLine = (line: THREE.Line) => {
@@ -630,16 +707,59 @@ export class LineTool {
       const isLineSegments = (line as any).isLineSegments === true;
       if (isLineSegments) {
         for (let i = 0; i < pts.length - 1; i += 2) {
-          addEdge(getIndex(pts[i]), getIndex(pts[i + 1]));
+          includeSegment(pts[i], pts[i + 1], "user");
         }
       } else {
         for (let i = 0; i < pts.length - 1; i++) {
-          addEdge(getIndex(pts[i]), getIndex(pts[i + 1]));
+          includeSegment(pts[i], pts[i + 1], "user");
         }
       }
     };
 
     for (const line of lineSources) addSegmentsFromLine(line);
+
+    if (extraPolyline && extraPolyline.length >= 2) {
+      for (let i = 0; i < extraPolyline.length - 1; i++) {
+        includeSegment(extraPolyline[i], extraPolyline[i + 1], "user");
+      }
+    }
+
+    if (includeMeshEdges) {
+      const seedKeys = new Set(keyToIndex.keys());
+      const a = new THREE.Vector3();
+      const b = new THREE.Vector3();
+
+      this.scene.traverse((obj) => {
+        if ((obj as any).userData?.isHelper) return;
+        if (obj.name === "SkyDome" || obj.name === "Grid" || obj.name === "AxesWorld" || (obj as any).isGridHelper) return;
+        if (!(obj as any).isMesh) return;
+
+        const mesh = obj as THREE.Mesh;
+        if (mesh.userData?.entityType === "face") return; // already represented by outlines
+
+        const geom = mesh.geometry;
+        if (!(geom instanceof THREE.BufferGeometry)) return;
+        if (!geom.getAttribute("position")) return;
+
+        const edgesGeom = this.getMeshEdgesGeometry(geom, meshEdgeThresholdAngle);
+        const pos = edgesGeom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
+
+        for (let i = 0; i < pos.count - 1; i += 2) {
+          a.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
+          b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1)).applyMatrix4(mesh.matrixWorld);
+
+          // Only use mesh edges that are incident to the current user/outline graph.
+          // Prevents creating faces purely from existing mesh wireframes.
+          const ka = keyOf(a);
+          const kb = keyOf(b);
+          if (!seedKeys.has(ka) && !seedKeys.has(kb)) continue;
+
+          includeSegment(a, b, "mesh");
+        }
+      });
+    }
+
     if (edges.length === 0) return;
 
     // Candidate planes from pairs of incident edges (allows planar faces even when the whole graph is non-planar).
@@ -664,24 +784,36 @@ export class LineTool {
     const qc = (v: number) => Math.round(v / planeConstEps);
 
     const planeCandidates = new Map<string, PlaneInfo>();
-    for (let i = 0; i < vertices.length; i++) {
-      const neigh = adjacency[i];
-      if (!neigh || neigh.length < 2) continue;
-      const origin = vertices[i];
+    if (planeFilter) {
+      const origin = new THREE.Vector3();
+      planeFilter.coplanarPoint(origin);
 
-      for (let a = 0; a < neigh.length - 1; a++) {
-        for (let b = a + 1; b < neigh.length; b++) {
-          const d1 = vertices[neigh[a]].clone().sub(origin);
-          const d2 = vertices[neigh[b]].clone().sub(origin);
-          const n = d1.cross(d2);
-          if (n.lengthSq() < 1e-10) continue;
-          n.normalize();
-          canonicalizeNormal(n);
+      const n = planeFilter.normal.clone().normalize();
+      canonicalizeNormal(n);
 
-          const c = n.dot(origin);
-          const key = `${qn(n.x)},${qn(n.y)},${qn(n.z)}|${qc(c)}`;
-          if (!planeCandidates.has(key)) {
-            planeCandidates.set(key, { normal: n.clone(), origin: origin.clone() });
+      const c = n.dot(origin);
+      const key = `${qn(n.x)},${qn(n.y)},${qn(n.z)}|${qc(c)}`;
+      planeCandidates.set(key, { normal: n, origin });
+    } else {
+      for (let i = 0; i < vertices.length; i++) {
+        const neigh = adjacency[i];
+        if (!neigh || neigh.length < 2) continue;
+        const origin = vertices[i];
+
+        for (let a = 0; a < neigh.length - 1; a++) {
+          for (let b = a + 1; b < neigh.length; b++) {
+            const d1 = vertices[neigh[a]].clone().sub(origin);
+            const d2 = vertices[neigh[b]].clone().sub(origin);
+            const n = d1.cross(d2);
+            if (n.lengthSq() < 1e-10) continue;
+            n.normalize();
+            canonicalizeNormal(n);
+
+            const c = n.dot(origin);
+            const key = `${qn(n.x)},${qn(n.y)},${qn(n.z)}|${qc(c)}`;
+            if (!planeCandidates.has(key)) {
+              planeCandidates.set(key, { normal: n.clone(), origin: origin.clone() });
+            }
           }
         }
       }
@@ -689,7 +821,6 @@ export class LineTool {
 
     if (planeCandidates.size === 0) return;
 
-    const planeDistEps = 1e-3;
     const areaEps = 1e-7;
     const maxWalkSteps = 10000;
 
@@ -702,6 +833,17 @@ export class LineTool {
         sum += a.x * b.y - a.y * b.x;
       }
       return sum * 0.5;
+    };
+
+    const loopHasUserEdge = (loop: number[]) => {
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i];
+        const b = loop[(i + 1) % loop.length];
+        const min = Math.min(a, b);
+        const max = Math.max(a, b);
+        if (userEdgeSet.has(`${min}|${max}`)) return true;
+      }
+      return false;
     };
 
     for (const { normal, origin } of planeCandidates.values()) {
@@ -790,6 +932,7 @@ export class LineTool {
 
           const area = signedArea2D(loop, coords);
           if (Math.abs(area) <= areaEps) continue; // ignore outer / degenerate
+          if (!loopHasUserEdge(loop)) continue;
 
           const hash = loop.map((idx) => keys[idx]).sort().join("|");
           if (this.createdFaceHashes.has(hash)) continue;
@@ -823,9 +966,30 @@ export class LineTool {
     const isClosed =
       this.points.length > 3 &&
       this.points[0].distanceTo(this.points[this.points.length - 1]) < 1e-5;
+
+    const computeLoopHash = (points: THREE.Vector3[]) => {
+      const closeEps = 1e-5;
+      const pts = points.slice();
+      if (pts[0].distanceTo(pts[pts.length - 1]) < closeEps) pts.pop();
+
+      const cleaned: THREE.Vector3[] = [];
+      for (const p of pts) {
+        const prev = cleaned[cleaned.length - 1];
+        if (prev && prev.distanceTo(p) < closeEps) continue;
+        cleaned.push(p.clone());
+      }
+
+      const keyEps = 1e-3;
+      const quant = (n: number) => Math.round(n / keyEps);
+      const keyOf = (v: THREE.Vector3) => `${quant(v.x)},${quant(v.y)},${quant(v.z)}`;
+      return cleaned.map(keyOf).sort().join("|");
+    };
+
+    const loopHash = isClosed ? computeLoopHash(this.points) : "";
+    const faceAlreadyExists = !!loopHash && this.createdFaceHashes.has(loopHash);
     let object: THREE.Object3D;
 
-    if (isClosed) {
+    if (isClosed && !faceAlreadyExists) {
       const mesh = this.createFaceFromLoop(this.points);
       if (mesh) {
         object = mesh;
@@ -841,22 +1005,6 @@ export class LineTool {
     }
 
     if ((object as any).isMesh) {
-      const closeEps = 1e-5;
-      const pts = this.points.slice();
-      if (pts[0].distanceTo(pts[pts.length - 1]) < closeEps) pts.pop();
-
-      const cleaned: THREE.Vector3[] = [];
-      for (const p of pts) {
-        const prev = cleaned[cleaned.length - 1];
-        if (prev && prev.distanceTo(p) < closeEps) continue;
-        cleaned.push(p.clone());
-      }
-
-      const keyEps = 1e-3;
-      const quant = (n: number) => Math.round(n / keyEps);
-      const keyOf = (v: THREE.Vector3) => `${quant(v.x)},${quant(v.y)},${quant(v.z)}`;
-      const loopHash = cleaned.map(keyOf).sort().join("|");
-
       if (loopHash) {
         object.userData.loopHash = loopHash;
         this.createdFaceHashes.add(loopHash);
@@ -883,7 +1031,7 @@ export class LineTool {
     }
 
     if ((object as any).isLine) {
-      this.tryAutoCreateFaces();
+      this.tryAutoCreateFaces({ includeMeshEdges: true });
     }
 
     this.points = [];

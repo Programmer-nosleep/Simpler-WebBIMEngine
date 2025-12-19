@@ -39,6 +39,8 @@ export class IntersectionGuide {
     line.frustumCulled = false; // Mencegah flickering saat update cepat
     line.renderOrder = 999; // Render di urutan akhir (di atas)
     line.visible = false;
+    line.userData.isHelper = true;
+    line.userData.selectable = false;
 
     return line;
   }

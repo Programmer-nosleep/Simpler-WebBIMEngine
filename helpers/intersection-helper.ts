@@ -27,15 +27,19 @@ export class IntersectionHelper {
     lastPoint: THREE.Vector3,
     candidatePoints: THREE.Vector3[],
     mouseScreen: THREE.Vector2,
-    snapDistPixels: number
+    snapDistPixels: number,
+    options?: { includeAdjacentMidpoints?: boolean }
   ): IntersectionResult | null {
     let best: IntersectionResult | null = null;
     
     // Gunakan endpoint dan tambahkan midpoint sebagai referensi intersection
     const targets: THREE.Vector3[] = [...candidatePoints];
-    for (let i = 0; i < candidatePoints.length - 1; i++) {
-      // Hitung midpoint antar titik untuk referensi tambahan
-      targets.push(candidatePoints[i].clone().add(candidatePoints[i + 1]).multiplyScalar(0.5));
+    const includeMidpoints = options?.includeAdjacentMidpoints ?? true;
+    if (includeMidpoints) {
+      for (let i = 0; i < candidatePoints.length - 1; i++) {
+        // Hitung midpoint antar titik untuk referensi tambahan
+        targets.push(candidatePoints[i].clone().add(candidatePoints[i + 1]).multiplyScalar(0.5));
+      }
     }
 
     for (const candidate of targets) {

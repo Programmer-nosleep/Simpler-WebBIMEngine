@@ -45,9 +45,9 @@ const init = async () => {
 	// Konfigurasi Mouse Controls (Opsional: Sesuaikan jika ingin gaya Revit/BIM)
 	// Default Three.js: LEFT=Orbit, MIDDLE=Dolly, RIGHT=Pan
 	if (cameraScene.camera.controls) {
-		// cameraScene.camera.controls.mouseButtons.left = THREE.MOUSE.ROTATE;
-		// cameraScene.camera.controls.mouseButtons.middle = THREE.MOUSE.DOLLY;
-		// cameraScene.camera.controls.mouseButtons.right = THREE.MOUSE.PAN;
+		cameraScene.camera.controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+		cameraScene.camera.controls.mouseButtons.middle = THREE.MOUSE.DOLLY;
+		cameraScene.camera.controls.mouseButtons.right = THREE.MOUSE.PAN;
 	}
 
 	// 2. Setup Gizmo
