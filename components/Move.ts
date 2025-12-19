@@ -72,7 +72,6 @@ export class MoveTool {
   }
 
   // --- Event Handlers ---
-
   private onPointerDown = (e: PointerEvent) => {
     if (!this.enabled || e.button !== 0) return;
 

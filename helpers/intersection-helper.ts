@@ -1,5 +1,4 @@
 import * as THREE from "three";
-import { type SnapKind } from "./snapping-helper";
 
 export type IntersectionResult = {
   point: THREE.Vector3;
@@ -7,6 +6,8 @@ export type IntersectionResult = {
   axis2: "x" | "y" | "z";
   origin1: THREE.Vector3;
   origin2: THREE.Vector3;
+  point1: THREE.Vector3;
+  point2: THREE.Vector3;
   dist: number;
 };
 
@@ -119,6 +120,8 @@ export class IntersectionHelper {
               axis2: ax2.name,
               origin2: p2,
               dist,
+              point1: intersect1,
+              point2: intersect2,
             };
           }
         }

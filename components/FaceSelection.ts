@@ -4,6 +4,7 @@ import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 
 export type FaceSelectionOptions = {
+  scene: THREE.Scene;
   cube: THREE.Mesh;
   cubeGeometry: THREE.BufferGeometry;
   faceMaterials: THREE.MeshBasicMaterial[];
@@ -22,6 +23,7 @@ export type FaceSelectionOptions = {
 
 export function setupFaceSelection(options: FaceSelectionOptions) {
   const {
+    scene,
     cube,
     cubeGeometry,
     faceMaterials,
@@ -51,7 +53,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const selectedFaceOverlay = new THREE.Group();
   selectedFaceOverlay.visible = false;
-  cube.add(selectedFaceOverlay);
+  scene.add(selectedFaceOverlay);
 
   const dotsMaterial = new THREE.PointsMaterial({
     color: dotColor,
@@ -180,11 +182,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
-  let hoveredFace: number | null = null;
-  let selectedFace: number | null = null;
+  let hoveredObject: THREE.Object3D | null = null;
+  let hoveredFaceIndex: number | null = null;
+  let selectedObject: THREE.Object3D | null = null;
+  let selectedFaceIndex: number | null = null;
   let selectedFaceNormal: THREE.Vector3 | null = null;
   let showSelectedBorder = false;
-  let overlayAxis: "x" | "y" | "z" | null = null;
+  let overlayAxis: string | null = null;
 
   function setPointerFromEvent(event: PointerEvent | MouseEvent) {
     const rect = canvas.getBoundingClientRect();
@@ -193,50 +197,98 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   }
 
   function pickFace() {
-    const intersection = raycaster.intersectObject(cube, false)[0];
+    const candidates: THREE.Object3D[] = [cube];
+    scene.traverse((obj) => {
+      if (obj !== cube && obj.userData.selectable && (obj as any).isMesh) {
+        candidates.push(obj);
+      }
+    });
+
+    const intersection = raycaster.intersectObjects(candidates, false)[0];
     const materialIndex = intersection?.face?.materialIndex;
     const normal = intersection?.face?.normal;
 
     if (typeof materialIndex !== "number" || !normal) return null;
-    return { materialIndex, normal: normal.clone() };
+    return { object: intersection.object, materialIndex, normal: normal.clone() };
   }
 
-  function setFaceColor(index: number, color: number) {
-    const material = faceMaterials[index];
-    if (!material) return;
-    material.color.set(color);
+  function setFaceColor(object: THREE.Object3D, index: number, color: number) {
+    if (object === cube) {
+      const material = faceMaterials[index];
+      if (!material) return;
+      material.color.set(color);
+    } else if ((object as THREE.Mesh).isMesh) {
+      const mesh = object as THREE.Mesh;
+      if (mesh.material instanceof THREE.MeshBasicMaterial) {
+        mesh.material.color.set(color);
+      }
+    }
   }
 
   function updateSelectEffect() {
     updateBorderResolution();
 
     for (let index = 0; index < faceMaterials.length; index++) {
-      setFaceColor(index, faceBaseColor);
+      setFaceColor(cube, index, faceBaseColor);
+    }
+    scene.traverse((obj) => {
+      if (obj !== cube && obj.userData.selectable && (obj as any).isMesh) {
+        setFaceColor(obj, 0, faceBaseColor);
+      }
+    });
+
+    if (hoveredObject && hoveredFaceIndex !== null) {
+      if (hoveredObject !== selectedObject) {
+        setFaceColor(hoveredObject, hoveredFaceIndex, faceHoverColor);
+      }
     }
 
-    if (hoveredFace !== null && hoveredFace !== selectedFace) {
-      setFaceColor(hoveredFace, faceHoverColor);
-    }
-
-    if (!selectedFaceNormal) {
+    if (!selectedObject || !selectedFaceNormal) {
       selectedFaceOverlay.visible = false;
       overlayAxis = null;
       return;
     }
 
-    const faceInfo = getFaceInfoFromNormal(selectedFaceNormal);
     selectedFaceOverlay.visible = true;
-    selectedFaceOverlay.position
-      .copy(faceInfo.center)
-      .addScaledVector(faceInfo.normal, SURFACE_OFFSET);
-    selectedFaceOverlay.rotation.copy(faceInfo.rotation);
 
-    if (overlayAxis !== faceInfo.axis) {
-      overlayAxis = faceInfo.axis;
-      dots.geometry.dispose();
-      dots.geometry = createDotsGeometry(faceInfo.width, faceInfo.height, DOT_SPACING);
-      faceBorder.geometry.dispose();
-      faceBorder.geometry = createBorderGeometry(faceInfo.width, faceInfo.height);
+    if (selectedObject === cube) {
+      if (selectedFaceOverlay.parent !== cube) cube.add(selectedFaceOverlay);
+      const faceInfo = getFaceInfoFromNormal(selectedFaceNormal);
+      selectedFaceOverlay.position
+        .copy(faceInfo.center)
+        .addScaledVector(faceInfo.normal, SURFACE_OFFSET);
+      selectedFaceOverlay.rotation.copy(faceInfo.rotation);
+
+      if (overlayAxis !== faceInfo.axis) {
+        overlayAxis = faceInfo.axis;
+        dots.geometry.dispose();
+        dots.geometry = createDotsGeometry(faceInfo.width, faceInfo.height, DOT_SPACING);
+        faceBorder.geometry.dispose();
+        faceBorder.geometry = createBorderGeometry(faceInfo.width, faceInfo.height);
+      }
+    } else {
+      const mesh = selectedObject as THREE.Mesh;
+      if (selectedFaceOverlay.parent !== mesh) mesh.add(selectedFaceOverlay);
+
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry.boundingBox!;
+      const width = box.max.x - box.min.x;
+      const height = box.max.y - box.min.y;
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+
+      selectedFaceOverlay.position.copy(center);
+      selectedFaceOverlay.position.z += SURFACE_OFFSET;
+      selectedFaceOverlay.rotation.set(0, 0, 0);
+
+      const key = `mesh_${mesh.id}`;
+      if (overlayAxis !== key) {
+        overlayAxis = key;
+        dots.geometry.dispose();
+        dots.geometry = createDotsGeometry(width, height, DOT_SPACING);
+        faceBorder.geometry.dispose();
+        faceBorder.geometry = createBorderGeometry(width, height);
+      }
     }
 
     faceBorder.visible = showSelectedBorder;
@@ -246,13 +298,16 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     setPointerFromEvent(event);
     raycaster.setFromCamera(pointer, getActiveCamera());
 
-    hoveredFace = pickFace()?.materialIndex ?? null;
-    canvas.style.cursor = hoveredFace !== null ? "pointer" : "";
+    const hit = pickFace();
+    hoveredObject = hit?.object ?? null;
+    hoveredFaceIndex = hit?.materialIndex ?? null;
+    canvas.style.cursor = hoveredObject ? "pointer" : "";
     updateSelectEffect();
   };
 
   const onPointerLeave = () => {
-    hoveredFace = null;
+    hoveredObject = null;
+    hoveredFaceIndex = null;
     canvas.style.cursor = "";
     updateSelectEffect();
   };
@@ -262,8 +317,10 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     raycaster.setFromCamera(pointer, getActiveCamera());
 
     const hit = pickFace();
-    hoveredFace = hit?.materialIndex ?? null;
-    selectedFace = hit?.materialIndex ?? null;
+    hoveredObject = hit?.object ?? null;
+    hoveredFaceIndex = hit?.materialIndex ?? null;
+    selectedObject = hit?.object ?? null;
+    selectedFaceIndex = hit?.materialIndex ?? null;
     selectedFaceNormal = hit?.normal ?? null;
     showSelectedBorder = false;
     updateSelectEffect();
@@ -275,8 +332,10 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
     const hit = pickFace();
     if (!hit) return;
-    hoveredFace = hit.materialIndex;
-    selectedFace = hit.materialIndex;
+    hoveredObject = hit.object;
+    hoveredFaceIndex = hit.materialIndex;
+    selectedObject = hit.object;
+    selectedFaceIndex = hit.materialIndex;
     selectedFaceNormal = hit.normal;
     showSelectedBorder = true;
     updateSelectEffect();
@@ -293,10 +352,12 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   canvas.addEventListener("dblclick", onDoubleClick);
 
   const setSelectionByNormal = (normal: THREE.Vector3 | null, border = true) => {
-    selectedFace = null;
+    selectedObject = normal ? cube : null;
+    selectedFaceIndex = null;
     selectedFaceNormal = normal ? normal.clone() : null;
     showSelectedBorder = border && !!normal;
-    hoveredFace = null;
+    hoveredObject = null;
+    hoveredFaceIndex = null;
     updateSelectEffect();
   };
 
@@ -312,7 +373,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("click", onClick);
       canvas.removeEventListener("dblclick", onDoubleClick);
-      cube.remove(selectedFaceOverlay);
+      selectedFaceOverlay.removeFromParent();
       dots.geometry.dispose();
       faceBorder.geometry.dispose();
       dotsMaterial.dispose();

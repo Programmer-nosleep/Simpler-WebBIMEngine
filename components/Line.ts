@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { SnappingHelper, type SnapKind, type SnapResult } from "../helpers/snapping-helper";
-import { IntersectionHelper } from "../helpers/intersection-helper";
+import { IntersectionHelper, type IntersectionResult } from "../helpers/intersection-helper";
+import { IntersectionGuide } from "../helpers/intersection-guide";
 
 type PickInfo = {
   point: THREE.Vector3;
@@ -22,6 +23,7 @@ export class LineTool {
   private planeLocked = false;
   private snappingHelper: SnappingHelper;
   private intersectionHelper: IntersectionHelper;
+  private intersectionGuide: IntersectionGuide;
 
   // Visual Helpers
   private previewLine: THREE.Line | null = null;
@@ -66,6 +68,7 @@ export class LineTool {
       this.getCamera,
       this.container
     );
+    this.intersectionGuide = new IntersectionGuide(this.scene);
   }
 
   public enable() {
@@ -133,6 +136,7 @@ export class LineTool {
     this.snapGuides = null;
     this.snapGuideLines = [];
     this.edgeGuide = null;
+    this.intersectionGuide.update(null);
   }
 
   // --- Event Handlers ---
@@ -150,6 +154,7 @@ export class LineTool {
     let target = pick.point.clone();
     let snappedAxis: "x" | "y" | "z" | null = null;
     let snappedEdgeDir: THREE.Vector3 | null = null;
+    let intersectionResult: IntersectionResult | null = null;
 
     // 1. Snap ke Geometri (Endpoint/Midpoint)
     const rect = this.container.getBoundingClientRect();
@@ -186,10 +191,8 @@ export class LineTool {
         if (result) {
           dualSnap = result.point;
           target.copy(result.point);
-          axisSnapLines = [
-            { axis: result.axis1, origin: result.origin1 },
-            { axis: result.axis2, origin: result.origin2 },
-          ];
+          intersectionResult = result;
+          axisSnapLines = [];
           snappedAxis = null;
         }
       }
@@ -265,6 +268,7 @@ export class LineTool {
     this.updateAxisGuides(axisSnapLines.length > 1 ? axisSnapLines : []);
 
     this.updateEdgeGuide(snappedEdgeDir, this.points[this.points.length - 1]);
+    this.intersectionGuide.update(intersectionResult);
     this.updatePreviewLine(target);
 
     if (this.points.length > 0) {

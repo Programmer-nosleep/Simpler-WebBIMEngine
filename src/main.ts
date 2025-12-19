@@ -44,6 +44,7 @@ const init = async () => {
 
 	// 5. Setup Face Selection
 	const faceSelection = setupFaceSelection({
+		scene: cameraScene.scene,
 		cube: testObjectData.cube,
 		cubeGeometry: testObjectData.cubeGeometry,
 		faceMaterials: testObjectData.faceMaterials,
