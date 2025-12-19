@@ -8,6 +8,7 @@
         "@thatopen/components": "^3.2.6",
         "@thatopen/fragments": "^3.2.13",
         "polygon-clipping": "^0.15.7",
+        "three-bvh-csg": "^0.0.17",
         "three-dxf-loader": "^5.2.0",
         "web-ifc": "^0.0.74",
       },
@@ -193,6 +194,8 @@
     "strnum": ["strnum@1.1.2", "", {}, "sha512-vrN+B7DBIoTTZjnPNewwhx6cBA/H+IS7rfW68n7XxC1y7uoiGQBxaKzqucGUgavX15dJgiGztLJ8vxuEzwqBdA=="],
 
     "three": ["three@0.182.0", "", {}, "sha512-GbHabT+Irv+ihI1/f5kIIsZ+Ef9Sl5A1Y7imvS5RQjWgtTPfPnZ43JmlYI7NtCRDK9zir20lQpfg8/9Yd02OvQ=="],
+
+    "three-bvh-csg": ["three-bvh-csg@0.0.17", "", { "peerDependencies": { "three": ">=0.151.0", "three-mesh-bvh": ">=0.6.6" } }, "sha512-iEkHDF8GRfGM6593Cuw8SnF1vfENCp46gIAtRzuL4nGXGWPcR1sbTBwM9ptDONb5twqlZp5WkAKya5aBKe2qcA=="],
 
     "three-dxf-loader": ["three-dxf-loader@5.2.0", "", { "dependencies": { "@dxfom/mtext": "^0.3.2", "dxf-parser": "^1.1.2", "js-base64": "^3.7.3", "troika-three-text": "^0.48.0" }, "peerDependencies": { "three": "0.160.0" } }, "sha512-XV9IQYVsZXvLpBrmonmSWlZeaittOf4pNmrS33XbiqZ7T5BW0gAkdzNufMc4O21/tFfknXlQBSUwNS9TXKOajg=="],
 

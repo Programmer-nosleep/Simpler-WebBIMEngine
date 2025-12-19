@@ -13,6 +13,7 @@ const buttons: DockButton[] = [
   { id: "circle", label: "Circle", icon: "Circle" },
   { id: "rect", label: "Rectangle", icon: "Rectangle" },
   { id: "oct", label: "Octagon", icon: "Octagon" },
+  { id: "extrude", label: "Extrude", icon: "Extrude" },
   { id: "move", label: "Move", icon: "Move" },
   { id: "orbitTool", label: "Orbit", icon: "Orbit" },
   { id: "chat", label: "Chat", icon: "ChatCircle" },
@@ -27,6 +28,7 @@ export type DockToolId =
   | "circle"
   | "rect"
   | "oct"
+  | "extrude"
   | "move"
   | "orbitTool"
   | "chat";

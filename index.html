@@ -40,8 +40,8 @@
         <div class="control-panel">
           <label for="importerFormat">Import</label>
           <div class="control-row">
-            <input type="file" id="importer" />
-            <button type="button">Import</button>
+            <input type="file" id="importer" accept=".ifc,.glb,.gltf,.obj,.dwg,.dxf" />
+            <button id="importButton" type="button">Import</button>
           </div>
         </div>
 
@@ -54,7 +54,7 @@
               <option value="obj">OBJ</option>
               <option value="ifc">IFC</option>
             </select>
-            <button type="button">Export</button>
+            <button id="exportButton" type="button">Export</button>
           </div>
         </div>
 

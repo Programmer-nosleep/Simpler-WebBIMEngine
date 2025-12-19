@@ -13,6 +13,7 @@ import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
 import { LineTool } from "../components/Line";
 import { MoveTool } from "../components/Move";
+import { ExtrudeTool } from "../components/Extrude";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
 import { FileController } from "../components/tools/fileController";
 
@@ -92,12 +93,18 @@ const init = async () => {
 		getCamera,
 		container
 	);
+	const extrudeTool = new ExtrudeTool(getCamera, container, {
+		getSelectedObjects: () => selectionSystem.selectedObjects,
+		getControls: () => cameraScene.camera.controls as any,
+		wallThickness: 0.15,
+		floorThickness: 0.1,
+	});
 
 	// 8. Setup UI Bindings
 	setupUIBindings(cameraScene);
 
 	// 9. Setup Dock & Tool State Management
-	await setupDockSystem(cameraScene, lineTool, moveTool, selectionSystem, faceSelection);
+	await setupDockSystem(cameraScene, lineTool, moveTool, extrudeTool, selectionSystem, faceSelection);
 
 	// 10. Setup Elevation & Camera Controls
 	elevationControls = new ElevationCameraControls(cameraScene);
@@ -116,6 +123,34 @@ const init = async () => {
 
 		const fileController = new FileController(cameraScene.scene, cameraScene.components);
 		fileController.setupImport(importer);
+
+		const importButton = document.getElementById("importButton") as HTMLButtonElement | null;
+		const updateImportButton = () => {
+			if (!importButton) return;
+			const label = fileController.getPendingImportLabel();
+			importButton.disabled = !label;
+			importButton.title = label ? `Import: ${label}` : "Pilih file dulu, lalu klik Import";
+		};
+		updateImportButton();
+		importer.addEventListener("change", updateImportButton);
+
+		if (importButton) {
+			importButton.addEventListener("click", async () => {
+				await fileController.importPending();
+				updateImportButton();
+			});
+		}
+
+		const exportButton = document.getElementById("exportButton") as HTMLButtonElement | null;
+		const exporterFormat = document.getElementById("exporterFormat") as HTMLSelectElement | null;
+		if (exportButton && exporterFormat) {
+			exportButton.addEventListener("click", () => {
+				const format = exporterFormat.value;
+				if (format === "glb" || format === "obj" || format === "ifc") {
+					void fileController.export(format);
+				}
+			});
+		}
 	} catch (error) {
 		console.warn("File importer gagal diinisialisasi:", error);
 	}
@@ -497,6 +532,7 @@ const setupDockSystem = async (
 	cameraScene: any,
 	lineTool: LineTool,
 	moveTool: MoveTool,
+	extrudeTool: ExtrudeTool,
 	selectionSystem: any,
 	faceSelection: any
 ) => {
@@ -506,6 +542,7 @@ const setupDockSystem = async (
 		// Reset all tools first
 		lineTool.disable();
 		moveTool.disable();
+		extrudeTool.disable();
 		selectionSystem.selectionMarquee.disable();
 		faceSelection.setSelectionByNormal(null);
 
@@ -516,6 +553,9 @@ const setupDockSystem = async (
 			lineTool.enable();
 		} else if (tool === "move") {
 			moveTool.enable();
+		} else if (tool === "extrude") {
+			extrudeTool.enable();
+			selectionSystem.syncFaceSelection();
 		}
 	};
 
@@ -541,6 +581,12 @@ const setupDockSystem = async (
 			} else if (tool === "line") {
 				// cameraScene.setNavigationMode("Plan");
 			} else if (tool === "move") {
+				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+					controls.mouseButtons.right = THREE.MOUSE.PAN;
+				}
+			} else if (tool === "extrude") {
 				cameraScene.setNavigationMode("Orbit");
 				if (controls) {
 					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
