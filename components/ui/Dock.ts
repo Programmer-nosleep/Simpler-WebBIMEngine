@@ -11,8 +11,8 @@ const buttons: DockButton[] = [
   { id: "bezier", label: "Bezier", icon: "BezierCurve" },
   { id: "line", label: "Line", icon: "Line" },
   { id: "circle", label: "Circle", icon: "Circle" },
-  { id: "rect", label: "Rectangle", icon: "Rectangle" },
-  { id: "oct", label: "Octagon", icon: "Octagon" },
+  { id: "rectangle", label: "Rectangle", icon: "Rectangle" },
+  { id: "polygon", label: "Polygon", icon: "Octagon" },
   { id: "extrude", label: "Extrude", icon: "Extrude" },
   { id: "move", label: "Move", icon: "Move" },
   { id: "orbitTool", label: "Orbit", icon: "Orbit" },
@@ -26,8 +26,8 @@ export type DockToolId =
   | "bezier"
   | "line"
   | "circle"
-  | "rect"
-  | "oct"
+  | "rectangle"
+  | "polygon"
   | "extrude"
   | "move"
   | "orbitTool"

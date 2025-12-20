@@ -13,6 +13,9 @@ import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
 import { LineTool } from "../components/Line";
+import { RectangleTool } from "../components/surface/Rectangle";
+import { CircleTool } from "../components/surface/Circle";
+import { PolygonTool } from "../components/surface/Polygon";
 import { MoveTool } from "../components/Move";
 import { ExtrudeTool } from "../components/Extrude";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
@@ -34,7 +37,7 @@ const init = async () => {
 		onDefault: () => elevationControls?.setPerspective(),
 		onElevation: (dir) => elevationControls?.setElevationView(dir),
 	});
-	const rightSidebar = setupRightSidebar(document.getElementById("rightSidebar")!, {
+	setupRightSidebar(document.getElementById("rightSidebar")!, {
 		onUnitChange: (u) => console.log("unit", u),
 		onToleranceChange: (v) => console.log("tolerance", v),
 		onParallelSnapChange: (v) => console.log("parallel", v),
@@ -96,6 +99,21 @@ const init = async () => {
 		getCamera,
 		container
 	);
+	const rectangleTool = new RectangleTool(
+		cameraScene.scene,
+		getCamera,
+		container
+	);
+	const circleTool = new CircleTool(
+		cameraScene.scene,
+		getCamera,
+		container
+	);
+	const polygonTool = new PolygonTool(
+		cameraScene.scene,
+		getCamera,
+		container
+	);
 	const moveTool = new MoveTool(
 		cameraScene.scene,
 		getCamera,
@@ -124,6 +142,9 @@ const init = async () => {
 	const dock = await setupDockSystem(
 		cameraScene,
 		lineTool,
+		rectangleTool,
+		circleTool,
+		polygonTool,
 		moveTool,
 		extrudeTool,
 		selectionSystem,
@@ -132,6 +153,7 @@ const init = async () => {
 	);
 
 	leftSidebar.onSectionAdd(() => dock.setActiveTool("section"));
+	// rightSidebar.onSectionAdd(() => dock.setActiveTool("section"));
 
 	// 10. Setup Elevation & Camera Controls
 	elevationControls = new ElevationCameraControls(cameraScene);
@@ -661,6 +683,9 @@ const setupUIBindings = (cameraScene: any) => {
 const setupDockSystem = async (
 	cameraScene: any,
 	lineTool: LineTool,
+	rectangleTool: RectangleTool,
+	circleTool: CircleTool,
+	polygonTool: PolygonTool,
 	moveTool: MoveTool,
 	extrudeTool: ExtrudeTool,
 	selectionSystem: any,
@@ -672,6 +697,9 @@ const setupDockSystem = async (
 
 		// Reset all tools first
 		lineTool.disable();
+		rectangleTool.disable();
+		circleTool.disable();
+		polygonTool.disable();
 		moveTool.disable();
 		extrudeTool.disable();
 		sectionTool.disable();
@@ -683,12 +711,18 @@ const setupDockSystem = async (
 			selectionSystem.syncFaceSelection();
 		} else if (tool === "line") {
 			lineTool.enable();
+		} else if (tool === "rectangle") {
+			rectangleTool.enable();
+		} else if (tool === "circle") {
+			circleTool.enable();
+		} else if (tool === "polygon") {
+			polygonTool.enable();
 		} else if (tool === "move") {
 			moveTool.enable();
 		} else if (tool === "extrude") {
 			extrudeTool.enable();
 			selectionSystem.syncFaceSelection();
-		} else if (tool === ("section" as DockToolId)) {
+		} else if (tool === "section") {
 			sectionTool.enable();
 		}
 	};
@@ -714,6 +748,8 @@ const setupDockSystem = async (
 				}
 			} else if (tool === "line") {
 				// cameraScene.setNavigationMode("Plan");
+			} else if (tool === "rectangle" || tool === "circle" || tool === "polygon") {
+				// Opsional: Atur navigasi khusus jika diperlukan
 			} else if (tool === "move") {
 				cameraScene.setNavigationMode("Orbit");
 				if (controls) {
@@ -726,7 +762,7 @@ const setupDockSystem = async (
 					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
 					controls.mouseButtons.right = THREE.MOUSE.PAN;
 				}
-			} else if (tool === ("section" as DockToolId)) {
+			} else if (tool === "section") {
 				cameraScene.setNavigationMode("Orbit");
 				if (controls) {
 					controls.mouseButtons.left = THREE.MOUSE.ROTATE;

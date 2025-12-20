@@ -285,7 +285,7 @@ function meshToPolygon2D(mesh: THREE.Mesh): Poly2 | null {
 // --------------------------------------------------------
 
 /** Tambah edgeWire tipis ke mesh (dipakai juga di finalizePreview) */
-function addEdgeWireToMesh(mesh: THREE.Mesh) {
+export function addEdgeWireToMesh(mesh: THREE.Mesh) {
   try {
     const existing = (mesh.children || []).find(
       (c) => c.name === "__edgeWire"
@@ -380,6 +380,8 @@ function buildFloorMeshFromRing(
   mesh.userData.label = "Polygon";
   mesh.userData.category = "Plane/Sketch";
   mesh.userData.QreaseeCategory = "Floor";
+  mesh.userData.selectable = true;
+  mesh.userData.locked = false;
   // mesh.userData.IFCClass = fallbackMapIFC["Floor"];
   const storedRing = ensureClosedRing(ring);
   mesh.userData.surfaceMeta = {
@@ -436,7 +438,8 @@ function addOutlineFromRing(parent: THREE.Mesh, ring: Ring2D) {
       (lineMesh.userData as any) = {
         ...(lineMesh.userData || {}),
         type: "line",
-        selectable: true,
+        selectable: false,
+        isHelper: true,
         isThickOutline: true,
         isFloorOutline: true,
         isConnection: false,

@@ -1,253 +1,265 @@
 import * as THREE from "three";
-import * as OBC from "@thatopen/components";
-import { RectangleEntity } from "../../entity/RectangleEntity";
 import { splitFloorsWithNewRect } from "../../helpers/polygon-clipper";
 
-// Helper for temporary material
 function makeMaterial(color = 0xffffff, opacity = 1.0) {
-    return new THREE.MeshStandardMaterial({
-        color: color,
-        transparent: opacity < 1,
-        opacity: opacity,
-        side: THREE.DoubleSide,
-    });
+	return new THREE.MeshStandardMaterial({
+		color,
+		transparent: opacity < 1,
+		opacity,
+		side: THREE.DoubleSide,
+	});
 }
 
 function makeEdgeMaterial(color = 0x000000) {
-    return new THREE.LineBasicMaterial({ color: color });
+	return new THREE.LineBasicMaterial({ color });
 }
 
-export class RectangleTool extends OBC.Component implements OBC.Disposable {
-    enabled = false;
-    readonly onDisposed = new OBC.Event();
+export class RectangleTool {
+	private scene: THREE.Scene;
+	private getCamera: () => THREE.Camera;
+	private container: HTMLElement;
 
-    private _scene!: THREE.Scene;
-    private _camera!: THREE.Camera;
-    private _renderer!: THREE.WebGLRenderer;
-    private _canvas!: HTMLCanvasElement;
+	private enabled = false;
+	private isDrawing = false;
+	private anchor: THREE.Vector3 | null = null;
+	private previewMesh: THREE.Mesh | null = null;
+	private previewEdge: THREE.LineLoop | null = null;
+	private dimOverlay: HTMLInputElement | null = null;
 
-    // State
-    private isDrawing = false;
-    private anchor: THREE.Vector3 | null = null;
-    private previewMesh: THREE.Mesh | null = null;
-    private previewEdge: THREE.LineLoop | null = null;
-    private dimOverlay: HTMLInputElement | null = null;
+	private mouse = new THREE.Vector2();
+	private raycaster = new THREE.Raycaster();
+	private planeXZ = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
-    private mouse = new THREE.Vector2();
-    private raycaster = new THREE.Raycaster();
-    private planeXZ = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+	constructor(
+		scene: THREE.Scene,
+		camera: THREE.Camera | (() => THREE.Camera),
+		container: HTMLElement
+	) {
+		this.scene = scene;
+		this.getCamera = typeof camera === "function" ? camera : () => camera;
+		this.container = container;
+	}
 
-    constructor(components: OBC.Components) {
-        super(components);
-    }
+	public enable() {
+		if (this.enabled) return;
+		this.enabled = true;
+		this.container.style.cursor = "crosshair";
 
-    setup(scene: THREE.Scene, camera: THREE.Camera, renderer: THREE.WebGLRenderer) {
-        this._scene = scene;
-        this._camera = camera;
-        this._renderer = renderer;
-        this._canvas = renderer.domElement;
+		this.container.addEventListener("pointermove", this.onPointerMove, { capture: true });
+		this.container.addEventListener("pointerdown", this.onPointerDown, { capture: true });
+		window.addEventListener("keydown", this.onKeyDown);
+	}
 
-        this._canvas.addEventListener("pointermove", this.onPointerMove);
-        this._canvas.addEventListener("pointerdown", this.onPointerDown);
-        window.addEventListener("keydown", this.onKeyDown);
-    }
+	public disable() {
+		if (!this.enabled) return;
+		this.enabled = false;
+		this.container.style.cursor = "default";
 
-    dispose() {
-        this.enabled = false;
-        this.onDisposed.trigger();
-        this.cleanup();
-        this._canvas?.removeEventListener("pointermove", this.onPointerMove);
-        this._canvas?.removeEventListener("pointerdown", this.onPointerDown);
-        window.removeEventListener("keydown", this.onKeyDown);
-    }
+		this.container.removeEventListener("pointermove", this.onPointerMove, { capture: true });
+		this.container.removeEventListener("pointerdown", this.onPointerDown, { capture: true });
+		window.removeEventListener("keydown", this.onKeyDown);
 
-    private onPointerDown = (e: PointerEvent) => {
-        if (!this.enabled || e.button !== 0) return;
+		this.cleanup();
+	}
 
-        const hit = this.raycast(e);
-        if (!hit) return;
+	private onPointerDown = (event: PointerEvent) => {
+		if (!this.enabled || event.button !== 0) return;
 
-        if (!this.isDrawing) {
-            // Start drawing
-            this.isDrawing = true;
-            this.anchor = hit.clone();
+		const hit = this.raycast(event);
+		if (!hit) return;
 
-            // Initial input for dimensions
-            this.showDimInput(e.clientX, e.clientY);
-        } else {
-            // Finish drawing
-            this.finalize();
-        }
-    };
+		event.preventDefault();
+		event.stopPropagation();
 
-    private onPointerMove = (e: PointerEvent) => {
-        if (!this.enabled || !this.isDrawing || !this.anchor) return;
+		if (!this.isDrawing) {
+			this.isDrawing = true;
+			this.anchor = hit.clone();
+			this.showDimInput(event.clientX, event.clientY);
+			return;
+		}
 
-        const hit = this.raycast(e);
-        if (!hit) return;
+		this.finalize();
+	};
 
-        // Calculate dimensions
-        // Handle shift/ctrl axis locking if needed (skipped for brevity)
+	private onPointerMove = (event: PointerEvent) => {
+		if (!this.enabled || !this.isDrawing || !this.anchor) return;
 
-        this.updatePreview(this.anchor, hit);
+		const hit = this.raycast(event);
+		if (!hit) return;
 
-        // Update input placeholder/value if visible
-        if (this.dimOverlay) {
-            const w = (Math.abs(hit.x - this.anchor.x)).toFixed(2);
-            const l = (Math.abs(hit.z - this.anchor.z)).toFixed(2);
-            this.dimOverlay.placeholder = `${w}m x ${l}m`;
-        }
-    };
+		event.preventDefault();
+		event.stopPropagation();
 
-    private onKeyDown = (e: KeyboardEvent) => {
-        if (!this.enabled) return;
+		this.updatePreview(this.anchor, hit);
 
-        if (e.key === 'Escape') {
-            this.cancel();
-        }
-    };
+		if (this.dimOverlay) {
+			const w = Math.abs(hit.x - this.anchor.x).toFixed(2);
+			const l = Math.abs(hit.z - this.anchor.z).toFixed(2);
+			this.dimOverlay.placeholder = `${w}m x ${l}m`;
+		}
+	};
 
-    private raycast(e: PointerEvent): THREE.Vector3 | null {
-        const rect = this._canvas.getBoundingClientRect();
-        this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+	private onKeyDown = (event: KeyboardEvent) => {
+		if (!this.enabled) return;
+		if (event.key === "Escape") this.cancel();
+	};
 
-        this.raycaster.setFromCamera(this.mouse, this._camera);
+	private raycast(event: PointerEvent): THREE.Vector3 | null {
+		const rect = this.container.getBoundingClientRect();
+		this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+		this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-        // 1. Check vertical faces first? (Skipped for basic impl)
+		this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
-        // 2. Check Plane XZ
-        const hit = new THREE.Vector3();
-        if (this.raycaster.ray.intersectPlane(this.planeXZ, hit)) {
-            return hit;
-        }
-        return null;
-    }
+		const hit = new THREE.Vector3();
+		if (this.raycaster.ray.intersectPlane(this.planeXZ, hit)) return hit;
+		return null;
+	}
 
-    private updatePreview(p1: THREE.Vector3, p2: THREE.Vector3) {
-        const minX = Math.min(p1.x, p2.x);
-        const maxX = Math.max(p1.x, p2.x);
-        const minZ = Math.min(p1.z, p2.z);
-        const maxZ = Math.max(p1.z, p2.z);
+	private updatePreview(p1: THREE.Vector3, p2: THREE.Vector3) {
+		const minX = Math.min(p1.x, p2.x);
+		const maxX = Math.max(p1.x, p2.x);
+		const minZ = Math.min(p1.z, p2.z);
+		const maxZ = Math.max(p1.z, p2.z);
 
-        const w = maxX - minX;
-        const l = maxZ - minZ;
-        const cx = minX + w / 2;
-        const cz = minZ + l / 2;
+		const width = maxX - minX;
+		const length = maxZ - minZ;
+		const cx = minX + width / 2;
+		const cz = minZ + length / 2;
 
-        // Update Mesh
-        if (!this.previewMesh) {
-            const geom = new THREE.PlaneGeometry(1, 1);
-            geom.rotateX(-Math.PI / 2);
-            this.previewMesh = new THREE.Mesh(geom, makeMaterial(0x99ccff, 0.5));
-            this._scene.add(this.previewMesh);
-        }
+		if (!this.previewMesh) {
+			const geom = new THREE.PlaneGeometry(1, 1);
+			geom.rotateX(-Math.PI / 2);
+			this.previewMesh = new THREE.Mesh(geom, makeMaterial(0x99ccff, 0.5));
+			this.previewMesh.userData.isHelper = true;
+			this.previewMesh.userData.selectable = false;
+			this.scene.add(this.previewMesh);
+		}
 
-        this.previewMesh.position.set(cx, 0, cz);
-        this.previewMesh.scale.set(w, 1, l);
+		this.previewMesh.position.set(cx, 0, cz);
+		this.previewMesh.scale.set(width, 1, length);
 
-        // Update Edge
-        if (!this.previewEdge) {
-            // Unit square
-            const pts = [
-                new THREE.Vector3(-0.5, 0, -0.5),
-                new THREE.Vector3(0.5, 0, -0.5),
-                new THREE.Vector3(0.5, 0, 0.5),
-                new THREE.Vector3(-0.5, 0, 0.5)
-            ];
-            const g = new THREE.BufferGeometry().setFromPoints(pts);
-            this.previewEdge = new THREE.LineLoop(g, makeEdgeMaterial());
-            this._scene.add(this.previewEdge);
-        }
-        this.previewEdge.position.set(cx, 0, cz);
-        this.previewEdge.scale.set(w, 1, l);
-    }
+		if (!this.previewEdge) {
+			const pts = [
+				new THREE.Vector3(-0.5, 0, -0.5),
+				new THREE.Vector3(0.5, 0, -0.5),
+				new THREE.Vector3(0.5, 0, 0.5),
+				new THREE.Vector3(-0.5, 0, 0.5),
+			];
+			const g = new THREE.BufferGeometry().setFromPoints(pts);
+			this.previewEdge = new THREE.LineLoop(g, makeEdgeMaterial());
+			this.previewEdge.userData.isHelper = true;
+			this.previewEdge.userData.selectable = false;
+			this.scene.add(this.previewEdge);
+		}
 
-    private finalize() {
-        if (!this.previewMesh || !this.anchor) return;
+		this.previewEdge.position.set(cx, 0.001, cz);
+		this.previewEdge.scale.set(width, 1, length);
+	}
 
-        // Get Dimensions from preview
-        const width = this.previewMesh.scale.x;
-        const length = this.previewMesh.scale.z;
-        const cx = this.previewMesh.position.x;
-        const cz = this.previewMesh.position.z;
+	private finalize() {
+		if (!this.previewMesh || !this.anchor) return;
 
-        // Create Entity
-        const rectEntity = new RectangleEntity(width, length);
-        rectEntity.setPosition(cx, 0, cz);
+		const width = this.previewMesh.scale.x;
+		const length = this.previewMesh.scale.z;
+		const cx = this.previewMesh.position.x;
+		const cz = this.previewMesh.position.z;
 
-        this._scene.add(rectEntity.mesh);
+		const geometry = new THREE.PlaneGeometry(1, 1);
+		geometry.rotateX(-Math.PI / 2);
+		const mesh = new THREE.Mesh(geometry, makeMaterial(0xcccccc, 0.5));
+		mesh.position.set(cx, 0, cz);
+		mesh.scale.set(width, 1, length);
 
-        // Perform Boolean on Floors
-        // We assume depth=0 for floor cutting, or use specific depth
-        splitFloorsWithNewRect(this._scene, rectEntity.mesh as THREE.Mesh, { depth: 0 });
+		mesh.userData = {
+			...(mesh.userData || {}),
+			type: "surface",
+			mode: "rect",
+			label: "Rectangle",
+			category: "Plane/Sketch",
+			QreaseeCategory: "Floor",
+			selectable: true,
+			locked: false,
+			depth: 0,
+			surfaceMeta: {
+				kind: "rect",
+				center: [cx, cz],
+				width,
+				length,
+				normal: { x: 0, y: 1, z: 0 },
+			},
+		};
 
-        this.cleanup();
-    }
+		splitFloorsWithNewRect(this.scene, mesh, { depth: 0 });
+		this.cleanup();
+	}
 
-    private cancel() {
-        this.cleanup();
-    }
+	private cancel() {
+		this.cleanup();
+	}
 
-    private cleanup() {
-        this.isDrawing = false;
-        this.anchor = null;
+	private cleanup() {
+		this.isDrawing = false;
+		this.anchor = null;
 
-        if (this.previewMesh) {
-            this.previewMesh.removeFromParent();
-            (this.previewMesh.geometry as any).dispose();
-            (this.previewMesh.material as any).dispose();
-            this.previewMesh = null;
-        }
+		if (this.previewMesh) {
+			this.previewMesh.removeFromParent();
+			this.previewMesh.geometry.dispose();
+			(this.previewMesh.material as THREE.Material).dispose();
+			this.previewMesh = null;
+		}
 
-        if (this.previewEdge) {
-            this.previewEdge.removeFromParent();
-            (this.previewEdge.geometry as any).dispose();
-            (this.previewEdge.material as any).dispose();
-            this.previewEdge = null;
-        }
+		if (this.previewEdge) {
+			this.previewEdge.removeFromParent();
+			this.previewEdge.geometry.dispose();
+			(this.previewEdge.material as THREE.Material).dispose();
+			this.previewEdge = null;
+		}
 
-        if (this.dimOverlay) {
-            this.dimOverlay.remove();
-            this.dimOverlay = null;
-        }
-    }
+		if (this.dimOverlay) {
+			this.dimOverlay.remove();
+			this.dimOverlay = null;
+		}
+	}
 
-    private showDimInput(x: number, y: number) {
-        if (this.dimOverlay) return;
+	private showDimInput(x: number, y: number) {
+		if (this.dimOverlay) return;
 
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = "0m x 0m";
-        Object.assign(input.style, {
-            position: "fixed",
-            left: `${x + 10}px`,
-            top: `${y + 10}px`,
-            zIndex: "1000",
-            padding: "4px",
-            borderRadius: "4px",
-            border: "1px solid #ccc"
-        });
+		const input = document.createElement("input");
+		input.type = "text";
+		input.placeholder = "0m x 0m";
+		Object.assign(input.style, {
+			position: "fixed",
+			left: `${x + 10}px`,
+			top: `${y + 10}px`,
+			zIndex: "1000",
+			padding: "4px",
+			borderRadius: "4px",
+			border: "1px solid #ccc",
+			background: "rgba(255,255,255,0.95)",
+		});
 
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                // Parse dims and finalize
-                // For now, basic parsing logic
-                const parts = input.value.split(/[x, ]+/);
-                if (parts.length >= 2) {
-                    // Apply manual dimensions
-                    const w = parseFloat(parts[0]);
-                    const l = parseFloat(parts[1]);
-                    if (w > 0 && l > 0 && this.anchor) {
-                        this.updatePreview(this.anchor, new THREE.Vector3(this.anchor.x + w, 0, this.anchor.z + l));
-                        this.finalize();
-                    }
-                }
-            }
-        });
+		input.addEventListener("keydown", (event) => {
+			if (event.key !== "Enter") return;
 
-        document.body.appendChild(input);
-        this.dimOverlay = input;
-        setTimeout(() => input.focus(), 10);
-    }
+			const parts = input.value.trim().split(/[x, ]+/).filter(Boolean);
+			if (parts.length < 2) return;
+
+			const w = parseFloat(parts[0]);
+			const l = parseFloat(parts[1]);
+
+			if (Number.isFinite(w) && Number.isFinite(l) && w > 0 && l > 0 && this.anchor) {
+				this.updatePreview(
+					this.anchor,
+					new THREE.Vector3(this.anchor.x + w, 0, this.anchor.z + l)
+				);
+				this.finalize();
+			}
+		});
+
+		document.body.appendChild(input);
+		this.dimOverlay = input;
+		setTimeout(() => input.focus(), 10);
+	}
 }
+
