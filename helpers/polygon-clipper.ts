@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import pc from "polygon-clipping";
-import { fallbackMapIFC } from "@/components/custom/SceneCanvas/utils/objectFactory";
-import { disposeObjectDeep } from "@/components/custom/SceneCanvas/utils/threeHelpers";
+// import { fallbackMapIFC } from "@/components/custom/SceneCanvas/utils/objectFactory";
+import { disposeObjectDeep } from "../utils/threeHelpers";
 
 // --------------------------------------------------------
 // Basic types (2D di plane XZ / polygon-clipping style)
@@ -380,7 +380,7 @@ function buildFloorMeshFromRing(
   mesh.userData.label = "Polygon";
   mesh.userData.category = "Plane/Sketch";
   mesh.userData.QreaseeCategory = "Floor";
-  mesh.userData.IFCClass = fallbackMapIFC["Floor"];
+  // mesh.userData.IFCClass = fallbackMapIFC["Floor"];
   const storedRing = ensureClosedRing(ring);
   mesh.userData.surfaceMeta = {
     kind: "poly",

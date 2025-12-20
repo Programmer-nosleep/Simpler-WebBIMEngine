@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { buildExtrusionGeometry } from "../helpers/csg";
+import { getCoplanarFaceRegionLocalToRoot, type FaceRegion } from "../utils/faceRegion";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 type ControlsLike = {
   enabled: boolean;
@@ -10,7 +12,11 @@ export type ExtrudeToolOptions = {
   getControls?: () => ControlsLike | null;
   getScene: () => THREE.Scene;
   onHover?: (object: THREE.Object3D | null, faceIndex: number | null) => void;
-  onPickFace?: (object: THREE.Object3D, normal?: THREE.Vector3) => void;
+  onPickFace?: (
+    object: THREE.Object3D,
+    normal?: THREE.Vector3,
+    region?: FaceRegion
+  ) => void;
   wallThickness?: number;
   floorThickness?: number;
 };
@@ -183,12 +189,17 @@ export class ExtrudeTool {
       if (hit.face?.normal) {
         const normalWorld = hit.face.normal
           .clone()
-          .transformDirection(selectedMesh.matrixWorld)
+          .transformDirection(hit.object.matrixWorld)
           .normalize();
         const normalLocalToRoot = this.worldNormalToLocal(root, normalWorld);
-        this.options.onPickFace?.(root, normalLocalToRoot);
+        const region = getCoplanarFaceRegionLocalToRoot(hit, root);
+        this.options.onPickFace?.(
+          root,
+          normalLocalToRoot,
+          region ?? undefined
+        );
       } else {
-        this.options.onPickFace?.(root, undefined);
+        this.options.onPickFace?.(root, undefined, undefined);
       }
     } catch {
       // ignore
@@ -650,7 +661,21 @@ export class ExtrudeTool {
       delete ud.__extrudeEdges;
     }
 
-    const edges = new THREE.EdgesGeometry(mesh.geometry, 25);
+    const baseGeometry = mesh.geometry as THREE.BufferGeometry | undefined;
+    const position = baseGeometry?.getAttribute("position") as THREE.BufferAttribute | undefined;
+
+    let edges: THREE.EdgesGeometry;
+    if (baseGeometry && position) {
+      const temp = new THREE.BufferGeometry();
+      temp.setAttribute("position", position);
+      if (baseGeometry.index) temp.setIndex(baseGeometry.index);
+      const welded = mergeVertices(temp, 1e-4);
+      temp.dispose();
+      edges = new THREE.EdgesGeometry(welded, 25);
+      welded.dispose();
+    } else {
+      edges = new THREE.EdgesGeometry(mesh.geometry, 25);
+    }
     const mat = new THREE.LineBasicMaterial({
       color: 0x1f1f1f,
       depthWrite: false,
@@ -724,4 +749,5 @@ export class ExtrudeTool {
     invRootQuat.invert();
     return normalWorld.clone().applyQuaternion(invRootQuat).normalize();
   }
+
 }

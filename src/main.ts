@@ -16,6 +16,8 @@ import { MoveTool } from "../components/Move";
 import { ExtrudeTool } from "../components/Extrude";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
 import { FileController } from "../components/tools/fileController";
+import { SectionTool } from "../components/SectionPlaneMode";
+import { getCoplanarFaceRegionLocalToRoot, type FaceRegion, type FaceTriangle } from "../utils/faceRegion";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -98,16 +100,23 @@ const init = async () => {
 		getControls: () => cameraScene.camera.controls as any,
 		getScene: () => cameraScene.scene,
 		onHover: (obj, idx) => faceSelection.setHovered(obj, idx),
-		onPickFace: (obj, normal) => selectionSystem.setPrimaryFace(obj, normal),
+		onPickFace: (obj, normal, region) => selectionSystem.setPrimaryFace(obj, normal, region),
 		wallThickness: 0.15,
 		floorThickness: 0.1,
 	});
+
+	const sectionTool = new SectionTool(
+		cameraScene.scene,
+		cameraScene.camera.three,
+		cameraScene.world.renderer,
+		container
+	);
 
 	// 8. Setup UI Bindings
 	setupUIBindings(cameraScene);
 
 	// 9. Setup Dock & Tool State Management
-	await setupDockSystem(cameraScene, lineTool, moveTool, extrudeTool, selectionSystem, faceSelection);
+	await setupDockSystem(cameraScene, lineTool, moveTool, extrudeTool, selectionSystem, faceSelection, sectionTool);
 
 	// 10. Setup Elevation & Camera Controls
 	elevationControls = new ElevationCameraControls(cameraScene);
@@ -245,6 +254,7 @@ const setupSelectionSystem = (
 	const selectionColor = new THREE.Color(0x4f8cff);
 	let primarySelectedObject: THREE.Object3D | null = null;
 	let primarySelectedNormal: THREE.Vector3 | null = null;
+	let primarySelectedRegion: FaceRegion | null = null;
 
 	const isSelectableRoot = (object: THREE.Object3D) =>
 		(object.userData as { selectable?: boolean } | undefined)?.selectable === true;
@@ -257,26 +267,46 @@ const setupSelectionSystem = (
 		return roots;
 	};
 
-	const syncFaceSelection = (primaryObject?: THREE.Object3D, primaryNormal?: THREE.Vector3) => {
+	const cloneSelectedRegion = (region?: FaceRegion) => {
+		if (!region) return null;
+		return {
+			triangles: region.triangles.map(
+				(tri) => [tri[0].clone(), tri[1].clone(), tri[2].clone()] as FaceTriangle
+			),
+		};
+	};
+
+	const syncFaceSelection = (
+		primaryObject?: THREE.Object3D,
+		primaryNormal?: THREE.Vector3,
+		primaryRegion?: FaceRegion
+	) => {
 		if (primaryObject) {
 			primarySelectedObject = primaryObject;
 			primarySelectedNormal = primaryNormal ? primaryNormal.clone() : null;
+			primarySelectedRegion = cloneSelectedRegion(primaryRegion);
 		}
 
 		if (primarySelectedObject && !selectedObjects.has(primarySelectedObject)) {
 			primarySelectedObject = null;
 			primarySelectedNormal = null;
+			primarySelectedRegion = null;
 		}
 
 		if (!primarySelectedObject && selectedObjects.size > 0) {
 			primarySelectedObject = selectedObjects.values().next().value ?? null;
 			primarySelectedNormal = null;
+			primarySelectedRegion = null;
 		}
 
 		if (selectedObjects.size > 0) {
 			const items = Array.from(selectedObjects).map((obj) => {
-				if (obj === primarySelectedObject && primarySelectedNormal) {
-					return { object: obj, normal: primarySelectedNormal };
+				if (obj === primarySelectedObject) {
+					return {
+						object: obj,
+						normal: primarySelectedNormal ?? undefined,
+						region: primarySelectedRegion ?? undefined,
+					};
 				}
 				return { object: obj };
 			});
@@ -392,10 +422,11 @@ const setupSelectionSystem = (
 		selectedObjects.clear();
 		primarySelectedObject = null;
 		primarySelectedNormal = null;
+		primarySelectedRegion = null;
 		syncFaceSelection();
 	};
 
-	const selectSingleObject = (object: THREE.Object3D, normal?: THREE.Vector3) => {
+	const selectSingleObject = (object: THREE.Object3D, normal?: THREE.Vector3, region?: FaceRegion) => {
 		Array.from(selectedObjects).forEach((obj) => {
 			if (obj === object) return;
 			setObjectSelection(obj, false);
@@ -405,26 +436,27 @@ const setupSelectionSystem = (
 			setObjectSelection(object, true);
 			selectedObjects.add(object);
 		}
-		syncFaceSelection(object, normal);
+		syncFaceSelection(object, normal, region);
 	};
 
-	const toggleObjectSelection = (object: THREE.Object3D, normal?: THREE.Vector3) => {
+	const toggleObjectSelection = (object: THREE.Object3D, normal?: THREE.Vector3, region?: FaceRegion) => {
 		if (selectedObjects.has(object)) {
 			setObjectSelection(object, false);
 			selectedObjects.delete(object);
 			if (primarySelectedObject === object) {
 				primarySelectedObject = selectedObjects.values().next().value ?? null;
 				primarySelectedNormal = null;
+				primarySelectedRegion = null;
 			}
 			syncFaceSelection();
 		} else {
 			setObjectSelection(object, true);
 			selectedObjects.add(object);
-			syncFaceSelection(object, normal);
+			syncFaceSelection(object, normal, region);
 		}
 	};
 
-	let lastClickTime = 0;
+	let lastClickTime = -Infinity;
 	const DOUBLE_CLICK_DELAY = 300;
 
 	const onCanvasPointerUp = (event: PointerEvent) => {
@@ -439,8 +471,18 @@ const setupSelectionSystem = (
 
 		selectionRaycaster.setFromCamera(selectionPointer, cameraScene.camera.three);
 		const hits = selectionRaycaster.intersectObjects(getSelectableRoots(), true);
-		const hit = hits[0];
-		const root = hit ? findSelectableRoot(hit.object) : null;
+
+		const isPickableHit = (hit: THREE.Intersection) => {
+			const obj = hit.object as any;
+			if (!obj) return false;
+			if (obj.userData?.isHelper) return false;
+			if (obj.userData?.selectable === false) return false;
+			if (obj.name === "SkyDome" || obj.name === "Grid" || obj.name === "AxesWorld") return false;
+			return true;
+		};
+
+		const firstHit = hits.find(isPickableHit);
+		const root = firstHit ? findSelectableRoot(firstHit.object) : null;
 
 		const faceNormalToRoot = (intersection: THREE.Intersection, targetRoot: THREE.Object3D) => {
 			if (!intersection.face?.normal) return undefined;
@@ -464,15 +506,26 @@ const setupSelectionSystem = (
 			return;
 		}
 
+		const meshHitForRoot = hits.find((h) => {
+			if (!isPickableHit(h)) return false;
+			if (findSelectableRoot(h.object) !== root) return false;
+			return (h.object as any).isMesh === true && !!h.face?.normal;
+		});
+
+		const normalForRoot = meshHitForRoot ? faceNormalToRoot(meshHitForRoot, root) : undefined;
+		const regionForRoot = meshHitForRoot
+			? getCoplanarFaceRegionLocalToRoot(meshHitForRoot, root) ?? undefined
+			: undefined;
+
 		if (event.shiftKey) {
-			toggleObjectSelection(root, hit ? faceNormalToRoot(hit, root) : undefined);
+			toggleObjectSelection(root, normalForRoot, regionForRoot);
 		} else {
 			if (isDoubleClick) {
 				// Double click: Select whole object (no normal restriction)
-				selectSingleObject(root, undefined);
+				selectSingleObject(root, undefined, undefined);
 			} else {
 				// Single click: Select specific face
-				selectSingleObject(root, hit ? faceNormalToRoot(hit, root) : undefined);
+				selectSingleObject(root, normalForRoot, regionForRoot);
 			}
 		}
 	};
@@ -485,13 +538,14 @@ const setupSelectionSystem = (
 		syncFaceSelection,
 		currentTool: "select" as DockToolId,
 		clearSelection,
-		selectSingle: (object: THREE.Object3D, normal?: THREE.Vector3) => selectSingleObject(object, normal),
-		setPrimaryFace: (object: THREE.Object3D, normal?: THREE.Vector3) => {
+		selectSingle: (object: THREE.Object3D, normal?: THREE.Vector3, region?: FaceRegion) =>
+			selectSingleObject(object, normal, region),
+		setPrimaryFace: (object: THREE.Object3D, normal?: THREE.Vector3, region?: FaceRegion) => {
 			if (!selectedObjects.has(object)) {
-				selectSingleObject(object, normal);
+				selectSingleObject(object, normal, region);
 				return;
 			}
-			syncFaceSelection(object, normal);
+			syncFaceSelection(object, normal, region);
 		},
 		selectAll: () => {
 			const roots = getSelectableRoots();
@@ -518,9 +572,7 @@ const setupSelectionSystem = (
 						} catch { }
 					}
 				});
-				try {
-					material.dispose();
-				} catch { }
+				material.dispose();	
 			};
 
 			const disposeObject3D = (object: THREE.Object3D) => {
@@ -597,7 +649,8 @@ const setupDockSystem = async (
 	moveTool: MoveTool,
 	extrudeTool: ExtrudeTool,
 	selectionSystem: any,
-	faceSelection: any
+	faceSelection: any,
+	sectionTool: SectionTool
 ) => {
 	const updateSelectionState = (tool: DockToolId) => {
 		selectionSystem.currentTool = tool;
@@ -606,6 +659,7 @@ const setupDockSystem = async (
 		lineTool.disable();
 		moveTool.disable();
 		extrudeTool.disable();
+		sectionTool.disable();
 		selectionSystem.selectionMarquee.disable();
 		faceSelection.setSelectionByNormal(null);
 
@@ -619,6 +673,8 @@ const setupDockSystem = async (
 		} else if (tool === "extrude") {
 			extrudeTool.enable();
 			selectionSystem.syncFaceSelection();
+		} else if (tool === ("section" as DockToolId)) {
+			sectionTool.enable();
 		}
 	};
 
@@ -650,6 +706,12 @@ const setupDockSystem = async (
 					controls.mouseButtons.right = THREE.MOUSE.PAN;
 				}
 			} else if (tool === "extrude") {
+				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+					controls.mouseButtons.right = THREE.MOUSE.PAN;
+				}
+			} else if (tool === ("section" as DockToolId)) {
 				cameraScene.setNavigationMode("Orbit");
 				if (controls) {
 					controls.mouseButtons.left = THREE.MOUSE.ROTATE;

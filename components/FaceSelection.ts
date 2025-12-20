@@ -3,6 +3,7 @@ import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import type { FaceRegion, FaceTriangle } from "../utils/faceRegion";
 
 export type FaceSelectionOptions = {
   scene: THREE.Scene;
@@ -20,6 +21,12 @@ export type FaceSelectionOptions = {
   dotSize?: number;
   borderColor?: number;
   borderLineWidth?: number;
+};
+
+type FaceSelectionItem = {
+  object: THREE.Object3D;
+  normal?: THREE.Vector3;
+  region?: FaceRegion;
 };
 
 export function setupFaceSelection(options: FaceSelectionOptions) {
@@ -71,12 +78,22 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     const cached = edgesPositionsCache.get(geometry);
     if (cached) return cached;
 
-    const merged = geometry.index ? null : mergeVertices(geometry);
-    const source = merged ?? geometry;
-    const edges = new THREE.EdgesGeometry(source);
+    const position = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    if (!position) return new Float32Array();
+
+    // Weld vertices so triangulation edges don't appear in EdgesGeometry.
+    // (Indexed geometries can still have duplicated vertices after CSG/extrude.)
+    const temp = new THREE.BufferGeometry();
+    temp.setAttribute("position", position);
+    if (geometry.index) temp.setIndex(geometry.index);
+
+    const welded = mergeVertices(temp, 1e-4);
+    temp.dispose();
+
+    const edges = new THREE.EdgesGeometry(welded, 25);
     const positions = (edges.attributes.position.array as Float32Array).slice();
     edges.dispose();
-    merged?.dispose();
+    welded.dispose();
 
     edgesPositionsCache.set(geometry, positions);
     return positions;
@@ -242,6 +259,176 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     return geometry;
   }
 
+  function createTriangleBorderGeometry(
+    vertices: FaceTriangle,
+    offset: number
+  ) {
+    const [a, b, c] = vertices;
+
+    const normal = new THREE.Vector3()
+      .subVectors(b, a)
+      .cross(new THREE.Vector3().subVectors(c, a));
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+
+    const o = normal.multiplyScalar(offset);
+    const pA = a.clone().add(o);
+    const pB = b.clone().add(o);
+    const pC = c.clone().add(o);
+
+    const lineGeo = new LineGeometry();
+    lineGeo.setPositions([
+      pA.x, pA.y, pA.z,
+      pB.x, pB.y, pB.z,
+      pC.x, pC.y, pC.z,
+      pA.x, pA.y, pA.z,
+    ]);
+    return lineGeo;
+  }
+
+  function createTriangleDotsGeometry(
+    vertices: FaceTriangle,
+    spacing: number,
+    offset: number
+  ) {
+    const [a, b, c] = vertices;
+    const positions: number[] = [];
+
+    const normal = new THREE.Vector3()
+      .subVectors(b, a)
+      .cross(new THREE.Vector3().subVectors(c, a));
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+
+    if (!Number.isFinite(spacing) || spacing <= 0) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(
+          [
+            a.x, a.y, a.z,
+            b.x, b.y, b.z,
+            c.x, c.y, c.z,
+          ],
+          3
+        )
+      );
+      return geometry;
+    }
+
+    const u = new THREE.Vector3().subVectors(b, a);
+    if (u.lengthSq() < 1e-12) u.subVectors(c, a);
+    if (u.lengthSq() < 1e-12) u.set(1, 0, 0);
+    u.normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    // 2D coords relative to a
+    const bRel = new THREE.Vector3().subVectors(b, a);
+    const cRel = new THREE.Vector3().subVectors(c, a);
+    const bx = bRel.dot(u);
+    const by = bRel.dot(v);
+    const cx = cRel.dot(u);
+    const cy = cRel.dot(v);
+
+    const minX = Math.min(0, bx, cx);
+    const maxX = Math.max(0, bx, cx);
+    const minY = Math.min(0, by, cy);
+    const maxY = Math.max(0, by, cy);
+
+    const sign = (px: number, py: number, ax: number, ay: number, bx: number, by: number) =>
+      (px - bx) * (ay - by) - (ax - bx) * (py - by);
+
+    const pointInTri = (px: number, py: number) => {
+      const b1 = sign(px, py, 0, 0, bx, by) < 0;
+      const b2 = sign(px, py, bx, by, cx, cy) < 0;
+      const b3 = sign(px, py, cx, cy, 0, 0) < 0;
+      return b1 === b2 && b2 === b3;
+    };
+
+    const offsetVec = normal.clone().multiplyScalar(offset);
+    const p = new THREE.Vector3();
+
+    const xStart = minX + spacing / 2;
+    const xEnd = maxX - spacing / 2;
+    const yStart = minY + spacing / 2;
+    const yEnd = maxY - spacing / 2;
+
+    for (let x = xStart; x <= xEnd; x += spacing) {
+      for (let y = yStart; y <= yEnd; y += spacing) {
+        if (!pointInTri(x, y)) continue;
+        p.copy(a)
+          .addScaledVector(u, x)
+          .addScaledVector(v, y)
+          .add(offsetVec);
+        positions.push(p.x, p.y, p.z);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    return geometry;
+  }
+
+  function createRegionBorderGeometry(triangles: FaceTriangle[], offset: number) {
+    if (triangles.length === 1) return createTriangleBorderGeometry(triangles[0], offset);
+
+    const [a, b, c] = triangles[0];
+    const normal = new THREE.Vector3()
+      .subVectors(b, a)
+      .cross(new THREE.Vector3().subVectors(c, a));
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+    const offsetVec = normal.multiplyScalar(offset);
+
+    const positions: number[] = [];
+    for (const tri of triangles) {
+      positions.push(
+        tri[0].x + offsetVec.x,
+        tri[0].y + offsetVec.y,
+        tri[0].z + offsetVec.z,
+        tri[1].x + offsetVec.x,
+        tri[1].y + offsetVec.y,
+        tri[1].z + offsetVec.z,
+        tri[2].x + offsetVec.x,
+        tri[2].y + offsetVec.y,
+        tri[2].z + offsetVec.z
+      );
+    }
+
+    const temp = new THREE.BufferGeometry();
+    temp.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const welded = mergeVertices(temp, 1e-4);
+    temp.dispose();
+
+    const edges = new THREE.EdgesGeometry(welded, 25);
+    const lineGeo = new LineGeometry();
+    lineGeo.setPositions((edges.attributes.position.array as Float32Array).slice());
+    edges.dispose();
+    welded.dispose();
+    return lineGeo;
+  }
+
+  function createRegionDotsGeometry(triangles: FaceTriangle[], spacing: number, offset: number) {
+    if (triangles.length === 1) return createTriangleDotsGeometry(triangles[0], spacing, offset);
+
+    const allPositions: number[] = [];
+    const tmp = new THREE.Vector3();
+
+    for (const tri of triangles) {
+      const geo = createTriangleDotsGeometry(tri, spacing, offset);
+      const posAttr = geo.getAttribute("position") as THREE.BufferAttribute;
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.fromBufferAttribute(posAttr, i);
+        allPositions.push(tmp.x, tmp.y, tmp.z);
+      }
+      geo.dispose();
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(allPositions, 3));
+    return geometry;
+  }
+
 
 
 
@@ -317,7 +504,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   let hoveredFaceIndex: number | null = null;
 
   // State untuk multi-selection
-  let currentSelection: { object: THREE.Object3D; normal?: THREE.Vector3 }[] = [];
+  let currentSelection: FaceSelectionItem[] = [];
   const activeOverlays = new Map<number, { group: THREE.Group; dots: THREE.Points; border: Line2 }>();
 
   let showSelectedBorder = false;
@@ -415,7 +602,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         activeOverlays.set(obj.id, overlay);
       }
 
-      updateOverlayGeometry(obj, overlay, item.normal);
+      updateOverlayGeometry(obj, overlay, item.normal, item.region);
 
       // Update visibility
       overlay.group.visible = true;
@@ -436,8 +623,25 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   function updateOverlayGeometry(
     obj: THREE.Object3D,
     overlay: { dots: THREE.Points; border: Line2; group: THREE.Group },
-    normal?: THREE.Vector3
+    normal?: THREE.Vector3,
+    region?: FaceRegion
   ) {
+    if (region) {
+      overlay.group.position.set(0, 0, 0);
+      overlay.group.rotation.set(0, 0, 0);
+      overlay.group.scale.set(1, 1, 1);
+
+      overlay.dots.visible = true;
+      overlay.border.visible = true;
+
+      overlay.dots.geometry.dispose();
+      overlay.dots.geometry = createRegionDotsGeometry(region.triangles, DOT_SPACING, SURFACE_OFFSET);
+
+      overlay.border.geometry.dispose();
+      overlay.border.geometry = createRegionBorderGeometry(region.triangles, SURFACE_OFFSET);
+      return;
+    }
+
     if (obj === faceObject) {
       if (normal) {
         const faceInfo = getFaceInfoFromNormal(normal, objectBox);
@@ -502,7 +706,6 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       const isMesh = (obj as any).isMesh === true;
       const mesh = isMesh ? (obj as THREE.Mesh) : null;
 
-      // Only apply face-normal overlay for real meshes.
       if (mesh && normal) {
         // Single Face Selection
         const faceInfo = getFaceInfoFromNormal(normal, bounds);
@@ -614,10 +817,17 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     updateSelectEffect();
   };
 
-  const setSelectedObjects = (items: { object: THREE.Object3D; normal?: THREE.Vector3 }[]) => {
-    currentSelection = items.map(item => ({
+  const setSelectedObjects = (items: FaceSelectionItem[]) => {
+    currentSelection = items.map((item) => ({
       object: item.object,
-      normal: item.normal ? item.normal.clone() : undefined
+      normal: item.normal ? item.normal.clone() : undefined,
+      region: item.region
+        ? {
+          triangles: item.region.triangles.map(
+            (tri) => [tri[0].clone(), tri[1].clone(), tri[2].clone()] as FaceTriangle
+          ),
+        }
+        : undefined,
     }));
     showSelectedBorder = true; // Default show border for object selection
     updateSelectEffect();
