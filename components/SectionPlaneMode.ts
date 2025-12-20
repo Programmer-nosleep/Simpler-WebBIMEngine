@@ -1,142 +1,105 @@
 import * as THREE from "three";
+import type { CameraSceneApi } from "./CameraScene";
+import type { LeftSidebarHandle } from "./ui/LeftSidebar";
+import { SectionManager } from "./utils/sections/SectionManager";
 
 export class SectionTool {
-	private scene: THREE.Scene;
-	private camera: THREE.Camera;
-	private renderer: THREE.WebGLRenderer;
-	private container: HTMLElement;
-	private raycaster: THREE.Raycaster;
-	private pointer: THREE.Vector2;
-	private previewBox: THREE.Mesh;
-	private active: boolean = false;
-	private sectionsGroup: THREE.Group;
-	private clippingPlanes: THREE.Plane[] = [];
+	private readonly cameraScene: CameraSceneApi;
+	private readonly container: HTMLElement;
+	private readonly raycaster = new THREE.Raycaster();
+	private readonly pointer = new THREE.Vector2();
+	private readonly sectionManager: SectionManager;
 
-	constructor(
-		scene: THREE.Scene,
-		camera: THREE.Camera,
-		renderer: any,
-		container: HTMLElement
-	) {
-		this.scene = scene;
-		this.camera = camera;
-		// Handle if renderer is a wrapper or the THREE renderer itself
-		this.renderer = renderer.three || renderer;
+	private enabled = false;
+	private selectableRoots: THREE.Object3D[] = [];
+	private lastPreviewHeight: number | null = null;
+
+	constructor(cameraScene: CameraSceneApi, sidebar: LeftSidebarHandle, container: HTMLElement) {
+		this.cameraScene = cameraScene;
 		this.container = container;
-		this.raycaster = new THREE.Raycaster();
-		this.pointer = new THREE.Vector2();
-		this.sectionsGroup = new THREE.Group();
-		this.scene.add(this.sectionsGroup);
-
-		// Preview Box (Blue Box)
-		const geometry = new THREE.BoxGeometry(1, 1, 1);
-		const material = new THREE.MeshBasicMaterial({
-			color: 0x0000ff,
-			wireframe: true,
-			transparent: true,
-			opacity: 0.5,
-		});
-		this.previewBox = new THREE.Mesh(geometry, material);
-		this.previewBox.visible = false;
-		// Ensure preview box isn't raycasted
-		this.previewBox.raycast = () => {};
-		this.scene.add(this.previewBox);
-
-		if (this.renderer) {
-			this.renderer.localClippingEnabled = true;
-		}
-
-		this.container.addEventListener("pointermove", this.onPointerMove);
-		this.container.addEventListener("pointerdown", this.onPointerDown);
+		this.sectionManager = new SectionManager(cameraScene, sidebar);
+		this.cameraScene.renderer.localClippingEnabled = true;
 	}
 
 	enable() {
-		this.active = true;
-		this.previewBox.visible = false;
+		if (this.enabled) return;
+		this.enabled = true;
+
+		this.refreshBounds();
+		this.sectionManager.handleToolActive(true);
+		this.container.style.cursor = "crosshair";
+
+		this.container.addEventListener("pointermove", this.onPointerMove);
+		this.container.addEventListener("pointerdown", this.onPointerDown, { capture: true });
 	}
 
 	disable() {
-		this.active = false;
-		this.previewBox.visible = false;
+		if (!this.enabled) return;
+		this.enabled = false;
+
+		this.sectionManager.handleToolActive(false);
+		this.container.style.cursor = "default";
+
+		this.container.removeEventListener("pointermove", this.onPointerMove);
+		this.container.removeEventListener("pointerdown", this.onPointerDown, { capture: true });
+		this.lastPreviewHeight = null;
+	}
+
+	refreshBounds() {
+		this.selectableRoots = this.getSelectableRoots();
+		this.sectionManager.setBoundsFromObjects(this.selectableRoots);
+	}
+
+	private getSelectableRoots() {
+		const roots: THREE.Object3D[] = [];
+		this.cameraScene.scene.traverse((obj) => {
+			const ud: any = obj.userData || {};
+			if (ud.isHelper) return;
+			if (ud.selectable !== true) return;
+			roots.push(obj);
+		});
+		return roots;
+	}
+
+	private isValidHit(hit: THREE.Intersection) {
+		const obj: any = hit.object as any;
+		if (!obj) return false;
+		if (obj.userData?.isHelper) return false;
+		if (obj.userData?.selectable === false) return false;
+		if (obj.userData?.isSection) return false;
+		if (obj.name === "SkyDome" || obj.name === "Grid" || obj.name === "AxesWorld") return false;
+		return (obj as any).isMesh === true;
 	}
 
 	private onPointerMove = (event: PointerEvent) => {
-		if (!this.active) return;
+		if (!this.enabled) return;
 
 		const rect = this.container.getBoundingClientRect();
 		this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
 		this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-		this.raycaster.setFromCamera(this.pointer, this.camera);
-		const intersects = this.raycaster.intersectObjects(this.scene.children, true);
+		this.raycaster.setFromCamera(this.pointer, this.cameraScene.camera.three);
 
-		// Filter valid meshes (exclude helpers, sky, etc.)
-		const hit = intersects.find((i) => {
-			if (i.object === this.previewBox) return false;
-			if (i.object.userData.isHelper) return false;
-			if (i.object.userData.isSection) return false;
-			if (i.object.name === "SkyDome" || i.object.name === "Grid" || i.object.name === "AxesWorld") return false;
-			return (i.object as any).isMesh;
-		});
+		const targets =
+			this.selectableRoots.length > 0 ? this.selectableRoots : this.cameraScene.scene.children;
+		const hits = this.raycaster.intersectObjects(targets, true);
+		const hit = hits.find((h) => this.isValidHit(h));
 
-		if (hit && hit.face) {
-			this.previewBox.visible = true;
-			this.previewBox.position.copy(hit.point);
-			
-			// Align box to surface normal
-			const normal = hit.face.normal!.clone().transformDirection(hit.object.matrixWorld).normalize();
-			const quaternion = new THREE.Quaternion();
-			quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
-			this.previewBox.setRotationFromQuaternion(quaternion);
-		} else {
-			this.previewBox.visible = false;
+		if (!hit) {
+			this.lastPreviewHeight = null;
+			return;
 		}
+
+		this.lastPreviewHeight = hit.point.y;
+		this.sectionManager.setPreviewHeight(this.lastPreviewHeight);
 	};
 
 	private onPointerDown = (event: PointerEvent) => {
-		if (!this.active || !this.previewBox.visible) return;
-		if (event.button !== 0) return; // Left click only
+		if (!this.enabled) return;
+		if (event.button !== 0) return;
+		if (this.lastPreviewHeight == null) return;
 
-		this.createSection(this.previewBox.position, this.previewBox.quaternion);
+		const index = this.sectionManager.getSectionCount() + 1;
+		this.sectionManager.createSection(`Plan ${index}`, this.lastPreviewHeight);
 	};
-
-	private createSection(position: THREE.Vector3, quaternion: THREE.Quaternion) {
-		const size = 2;
-		const geometry = new THREE.BoxGeometry(size, size, size);
-		const material = new THREE.MeshBasicMaterial({
-			color: 0x0000ff,
-			wireframe: true,
-			transparent: true,
-			opacity: 0.3,
-			side: THREE.DoubleSide
-		});
-		const sectionBox = new THREE.Mesh(geometry, material);
-		sectionBox.position.copy(position);
-		sectionBox.setRotationFromQuaternion(quaternion);
-		sectionBox.userData.isSection = true;
-		this.sectionsGroup.add(sectionBox);
-
-		// Create a clipping plane
-		// Plane normal is the box's Y axis (since we aligned Y to surface normal)
-		// We point it downwards (0, -1, 0) relative to the box to cut "into" the object
-		const normal = new THREE.Vector3(0, -1, 0).applyQuaternion(quaternion).normalize();
-		const constant = -position.dot(normal);
-		const plane = new THREE.Plane(normal, constant);
-		
-		// Add to global clipping planes
-		this.clippingPlanes.push(plane);
-		this.renderer.clippingPlanes = this.clippingPlanes;
-	}
-
-	public clear() {
-		// Remove meshes
-		for (let i = this.sectionsGroup.children.length - 1; i >= 0; i--) {
-			const child = this.sectionsGroup.children[i];
-			if ((child as any).geometry) (child as any).geometry.dispose();
-			this.sectionsGroup.remove(child);
-		}
-		// Clear planes
-		this.clippingPlanes = [];
-		this.renderer.clippingPlanes = [];
-	}
 }

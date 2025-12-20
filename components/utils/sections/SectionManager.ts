@@ -37,7 +37,7 @@ export class SectionManager {
     this.gizmo = null;
     this.clippingPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.previewHeight = 0;
-    this.gizmoVisible = true;
+    this.gizmoVisible = false;
     this.bounds = new THREE.Box3(
       new THREE.Vector3(-2, 0, -2),
       new THREE.Vector3(2, 2, 2)
@@ -112,7 +112,13 @@ export class SectionManager {
       label: `${section.label} (${section.height.toFixed(2)}m)`,
       icon: "grid",
       active: section.id === this.activeSectionId,
-      onSelect: () => this.activateSection(section.id),
+      onSelect: () => {
+        if (section.id === this.activeSectionId) {
+          this.clearActiveSection();
+        } else {
+          this.activateSection(section.id);
+        }
+      },
     }));
     this.sidebar.setSectionItems(items);
   }
@@ -120,9 +126,11 @@ export class SectionManager {
   public handleToolActive(active: boolean) {
     if (active) {
       this.gizmo?.setVisible(true);
-    } else if (!this.gizmoVisible && !this.activeSectionId) {
-      this.gizmo?.setVisible(false);
+      return;
     }
+
+    // Hide gizmo when the tool is inactive and there's no active clipping section.
+    this.gizmo?.setVisible(this.gizmoVisible || this.activeSectionId !== null);
   }
 
   public getSectionCount() {

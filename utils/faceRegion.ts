@@ -13,7 +13,7 @@ type FaceRegionOptions = {
 };
 
 const DEFAULT_NORMAL_THRESHOLD = 0.999;
-const DEFAULT_POSITION_EPSILON = 1e-5;
+const DEFAULT_POSITION_EPSILON = 1e-4;
 const DEFAULT_MAX_TRIANGLES = 10_000;
 
 function computeTriangleNormal(
@@ -69,28 +69,23 @@ export function getCoplanarFaceRegionLocalToRoot(
   const normalThreshold = options.normalThreshold ?? DEFAULT_NORMAL_THRESHOLD;
   const maxTriangles = options.maxTriangles ?? DEFAULT_MAX_TRIANGLES;
 
-  let vertexIds: Int32Array | null = null;
-  if (!index) {
-    const eps = options.positionEpsilon ?? DEFAULT_POSITION_EPSILON;
-    const ids = new Int32Array(position.count);
-    const map = new Map<string, number>();
-    let nextId = 0;
-    for (let i = 0; i < position.count; i++) {
-      const key = `${Math.round(position.getX(i) / eps)},${Math.round(
-        position.getY(i) / eps
-      )},${Math.round(position.getZ(i) / eps)}`;
-      let id = map.get(key);
-      if (id === undefined) {
-        id = nextId++;
-        map.set(key, id);
-      }
-      ids[i] = id;
+  const eps = options.positionEpsilon ?? DEFAULT_POSITION_EPSILON;
+  const ids = new Int32Array(position.count);
+  const map = new Map<string, number>();
+  let nextId = 0;
+  for (let i = 0; i < position.count; i++) {
+    const key = `${Math.round(position.getX(i) / eps)},${Math.round(
+      position.getY(i) / eps
+    )},${Math.round(position.getZ(i) / eps)}`;
+    let id = map.get(key);
+    if (id === undefined) {
+      id = nextId++;
+      map.set(key, id);
     }
-    vertexIds = ids;
+    ids[i] = id;
   }
 
-  const getVertexId = (vertexIndex: number) =>
-    index ? vertexIndex : (vertexIds ? vertexIds[vertexIndex] : vertexIndex);
+  const getVertexId = (vertexIndex: number) => ids[vertexIndex];
 
   const edgeMap = new Map<string, number[]>();
   const addEdge = (a: number, b: number, tri: number) => {
@@ -188,4 +183,3 @@ export function getCoplanarFaceRegionLocalToRoot(
   if (triangles.length === 0) return null;
   return { triangles };
 }
-

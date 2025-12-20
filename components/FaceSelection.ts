@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { Line2 } from "three/addons/lines/Line2.js";
-import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { FaceRegion, FaceTriangle } from "../utils/faceRegion";
@@ -170,7 +170,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     return boundsBoxLocal.clone();
   }
 
-  function createBoxEdgePathPositions(box: THREE.Box3): number[] {
+  function createBoxEdgeSegmentPositions(box: THREE.Box3): number[] {
     const min = box.min;
     const max = box.max;
 
@@ -184,33 +184,26 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     const c111 = new THREE.Vector3(max.x, max.y, max.z);
     const c011 = new THREE.Vector3(min.x, max.y, max.z);
 
-    // A continuous polyline that stays on the box edges (may repeat some edges).
-    const path = [
-      c000,
-      c100,
-      c101,
-      c001,
-      c000,
-      c010,
-      c110,
-      c111,
-      c011,
-      c010,
-      c110,
-      c100,
-      c110,
-      c111,
-      c101,
-      c111,
-      c011,
-      c001,
-      c011,
-      c010,
-      c000,
-    ];
-
     const positions: number[] = [];
-    for (const p of path) positions.push(p.x, p.y, p.z);
+    const pushSeg = (a: THREE.Vector3, b: THREE.Vector3) => {
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    };
+
+    // Bottom
+    pushSeg(c000, c100);
+    pushSeg(c100, c101);
+    pushSeg(c101, c001);
+    pushSeg(c001, c000);
+    // Top
+    pushSeg(c010, c110);
+    pushSeg(c110, c111);
+    pushSeg(c111, c011);
+    pushSeg(c011, c010);
+    // Vertical
+    pushSeg(c000, c010);
+    pushSeg(c100, c110);
+    pushSeg(c101, c111);
+    pushSeg(c001, c011);
     return positions;
   }
 
@@ -247,14 +240,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     const halfWidth = width / 2;
     const halfHeight = height / 2;
     const positions = [
-      -halfWidth, -halfHeight, 0,
-      halfWidth, -halfHeight, 0,
-      halfWidth, halfHeight, 0,
-      -halfWidth, halfHeight, 0,
-      -halfWidth, -halfHeight, 0,
+      -halfWidth, -halfHeight, 0, halfWidth, -halfHeight, 0,
+      halfWidth, -halfHeight, 0, halfWidth, halfHeight, 0,
+      halfWidth, halfHeight, 0, -halfWidth, halfHeight, 0,
+      -halfWidth, halfHeight, 0, -halfWidth, -halfHeight, 0,
     ];
 
-    const geometry = new LineGeometry();
+    const geometry = new LineSegmentsGeometry();
     geometry.setPositions(positions);
     return geometry;
   }
@@ -276,14 +268,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     const pB = b.clone().add(o);
     const pC = c.clone().add(o);
 
-    const lineGeo = new LineGeometry();
-    lineGeo.setPositions([
-      pA.x, pA.y, pA.z,
-      pB.x, pB.y, pB.z,
-      pC.x, pC.y, pC.z,
-      pA.x, pA.y, pA.z,
+    const segGeo = new LineSegmentsGeometry();
+    segGeo.setPositions([
+      pA.x, pA.y, pA.z, pB.x, pB.y, pB.z,
+      pB.x, pB.y, pB.z, pC.x, pC.y, pC.z,
+      pC.x, pC.y, pC.z, pA.x, pA.y, pA.z,
     ]);
-    return lineGeo;
+    return segGeo;
   }
 
   function createTriangleDotsGeometry(
@@ -401,31 +392,111 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     temp.dispose();
 
     const edges = new THREE.EdgesGeometry(welded, 25);
-    const lineGeo = new LineGeometry();
-    lineGeo.setPositions((edges.attributes.position.array as Float32Array).slice());
+    const segGeo = new LineSegmentsGeometry();
+    segGeo.setPositions((edges.attributes.position.array as Float32Array).slice());
     edges.dispose();
     welded.dispose();
-    return lineGeo;
+    return segGeo;
   }
 
   function createRegionDotsGeometry(triangles: FaceTriangle[], spacing: number, offset: number) {
     if (triangles.length === 1) return createTriangleDotsGeometry(triangles[0], spacing, offset);
 
-    const allPositions: number[] = [];
-    const tmp = new THREE.Vector3();
+    if (!Number.isFinite(spacing) || spacing <= 0) {
+      const flat: number[] = [];
+      for (const tri of triangles) {
+        flat.push(
+          tri[0].x, tri[0].y, tri[0].z,
+          tri[1].x, tri[1].y, tri[1].z,
+          tri[2].x, tri[2].y, tri[2].z
+        );
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+      return geometry;
+    }
+
+    const [a0, b0, c0] = triangles[0];
+    const normal = new THREE.Vector3()
+      .subVectors(b0, a0)
+      .cross(new THREE.Vector3().subVectors(c0, a0));
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+
+    const u = new THREE.Vector3().subVectors(b0, a0);
+    if (u.lengthSq() < 1e-12) u.subVectors(c0, a0);
+    if (u.lengthSq() < 1e-12) u.set(1, 0, 0);
+    u.normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    const origin = a0.clone();
+
+    const tris2d: Array<[number, number, number, number, number, number]> = [];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    const to2d = (p: THREE.Vector3) => {
+      const rel = new THREE.Vector3().subVectors(p, origin);
+      const x = rel.dot(u);
+      const y = rel.dot(v);
+      return { x, y };
+    };
 
     for (const tri of triangles) {
-      const geo = createTriangleDotsGeometry(tri, spacing, offset);
-      const posAttr = geo.getAttribute("position") as THREE.BufferAttribute;
-      for (let i = 0; i < posAttr.count; i++) {
-        tmp.fromBufferAttribute(posAttr, i);
-        allPositions.push(tmp.x, tmp.y, tmp.z);
+      const a = to2d(tri[0]);
+      const b = to2d(tri[1]);
+      const c = to2d(tri[2]);
+      tris2d.push([a.x, a.y, b.x, b.y, c.x, c.y]);
+
+      minX = Math.min(minX, a.x, b.x, c.x);
+      maxX = Math.max(maxX, a.x, b.x, c.x);
+      minY = Math.min(minY, a.y, b.y, c.y);
+      maxY = Math.max(maxY, a.y, b.y, c.y);
+    }
+
+    const sign = (px: number, py: number, ax: number, ay: number, bx: number, by: number) =>
+      (px - bx) * (ay - by) - (ax - bx) * (py - by);
+
+    const pointInTri2d = (px: number, py: number, t: [number, number, number, number, number, number]) => {
+      const [ax, ay, bx, by, cx, cy] = t;
+      const b1 = sign(px, py, ax, ay, bx, by) < 0;
+      const b2 = sign(px, py, bx, by, cx, cy) < 0;
+      const b3 = sign(px, py, cx, cy, ax, ay) < 0;
+      return b1 === b2 && b2 === b3;
+    };
+
+    const positions: number[] = [];
+    const offsetVec = normal.clone().multiplyScalar(offset);
+    const p3 = new THREE.Vector3();
+
+    const xStart = minX + spacing / 2;
+    const xEnd = maxX - spacing / 2;
+    const yStart = minY + spacing / 2;
+    const yEnd = maxY - spacing / 2;
+
+    for (let x = xStart; x <= xEnd; x += spacing) {
+      for (let y = yStart; y <= yEnd; y += spacing) {
+        let inside = false;
+        for (let i = 0; i < tris2d.length; i++) {
+          if (pointInTri2d(x, y, tris2d[i])) {
+            inside = true;
+            break;
+          }
+        }
+        if (!inside) continue;
+
+        p3.copy(origin)
+          .addScaledVector(u, x)
+          .addScaledVector(v, y)
+          .add(offsetVec);
+        positions.push(p3.x, p3.y, p3.z);
       }
-      geo.dispose();
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(allPositions, 3));
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     return geometry;
   }
 
@@ -505,7 +576,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   // State untuk multi-selection
   let currentSelection: FaceSelectionItem[] = [];
-  const activeOverlays = new Map<number, { group: THREE.Group; dots: THREE.Points; border: Line2 }>();
+  const activeOverlays = new Map<number, { group: THREE.Group; dots: THREE.Points; border: LineSegments2 }>();
 
   let showSelectedBorder = false;
 
@@ -583,7 +654,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         dots.renderOrder = 2;
         group.add(dots);
 
-        const border = new Line2(new LineGeometry(), faceBorderMaterial);
+        const border = new LineSegments2(new LineSegmentsGeometry(), faceBorderMaterial);
         border.renderOrder = 3;
         group.add(border);
 
@@ -622,7 +693,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   function updateOverlayGeometry(
     obj: THREE.Object3D,
-    overlay: { dots: THREE.Points; border: Line2; group: THREE.Group },
+    overlay: { dots: THREE.Points; border: LineSegments2; group: THREE.Group },
     normal?: THREE.Vector3,
     region?: FaceRegion
   ) {
@@ -690,7 +761,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         overlay.dots.geometry.dispose();
         overlay.dots.geometry = mergedDotsGeo;
 
-        const lineGeo = new LineGeometry();
+        const lineGeo = new LineSegmentsGeometry();
         lineGeo.setPositions(getEdgesPositions(objectGeometry));
         overlay.border.geometry.dispose();
         overlay.border.geometry = lineGeo;
@@ -767,12 +838,12 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         overlay.border.geometry.dispose();
 
         if (mesh && mesh.geometry) {
-          const lineGeo = new LineGeometry();
+          const lineGeo = new LineSegmentsGeometry();
           lineGeo.setPositions(getEdgesPositions(mesh.geometry));
           overlay.border.geometry = lineGeo;
         } else {
-          const lineGeo = new LineGeometry();
-          lineGeo.setPositions(createBoxEdgePathPositions(bounds));
+          const lineGeo = new LineSegmentsGeometry();
+          lineGeo.setPositions(createBoxEdgeSegmentPositions(bounds));
           overlay.border.geometry = lineGeo;
         }
       }

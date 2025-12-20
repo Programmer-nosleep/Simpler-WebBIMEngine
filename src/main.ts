@@ -29,7 +29,7 @@ const isNavigationMode = (value: string): value is NavigationModeOption =>
 const init = async () => {
 	let elevationControls: ElevationCameraControls;
 
-	setupLeftSidebar(undefined, {
+	const leftSidebar = setupLeftSidebar(undefined, {
 		onDefault: () => elevationControls?.setPerspective(),
 		onElevation: (dir) => elevationControls?.setElevationView(dir),
 	});
@@ -106,9 +106,8 @@ const init = async () => {
 	});
 
 	const sectionTool = new SectionTool(
-		cameraScene.scene,
-		cameraScene.camera.three,
-		cameraScene.world.renderer,
+		cameraScene,
+		leftSidebar,
 		container
 	);
 
@@ -116,7 +115,17 @@ const init = async () => {
 	setupUIBindings(cameraScene);
 
 	// 9. Setup Dock & Tool State Management
-	await setupDockSystem(cameraScene, lineTool, moveTool, extrudeTool, selectionSystem, faceSelection, sectionTool);
+	const dock = await setupDockSystem(
+		cameraScene,
+		lineTool,
+		moveTool,
+		extrudeTool,
+		selectionSystem,
+		faceSelection,
+		sectionTool
+	);
+
+	leftSidebar.onSectionAdd(() => dock.setActiveTool("section"));
 
 	// 10. Setup Elevation & Camera Controls
 	elevationControls = new ElevationCameraControls(cameraScene);
@@ -763,6 +772,8 @@ const setupDockSystem = async (
 			}
 		}
 	});
+
+	return dock;
 };
 
 init();
