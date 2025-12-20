@@ -136,7 +136,7 @@ export class RectangleTool {
 			this.scene.add(this.previewMesh);
 		}
 
-		this.previewMesh.position.set(cx, 0, cz);
+		this.previewMesh.position.set(cx, -0.5, cz);
 		this.previewMesh.scale.set(width, 1, length);
 
 		if (!this.previewEdge) {
@@ -153,7 +153,7 @@ export class RectangleTool {
 			this.scene.add(this.previewEdge);
 		}
 
-		this.previewEdge.position.set(cx, 0.001, cz);
+		this.previewEdge.position.set(cx, -0.499, cz);
 		this.previewEdge.scale.set(width, 1, length);
 	}
 
@@ -168,7 +168,7 @@ export class RectangleTool {
 		const geometry = new THREE.PlaneGeometry(1, 1);
 		geometry.rotateX(-Math.PI / 2);
 		const mesh = new THREE.Mesh(geometry, makeMaterial(0xcccccc, 0.5));
-		mesh.position.set(cx, 0, cz);
+		mesh.position.set(cx, -0.5, cz);
 		mesh.scale.set(width, 1, length);
 
 		mesh.userData = {
@@ -262,4 +262,3 @@ export class RectangleTool {
 		setTimeout(() => input.focus(), 10);
 	}
 }
-

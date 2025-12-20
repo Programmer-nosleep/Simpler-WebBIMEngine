@@ -14,9 +14,15 @@ importers:
       '@thatopen/fragments':
         specifier: ^3.2.13
         version: 3.2.13(three@0.182.0)(web-ifc@0.0.74)
+      camera-controls:
+        specifier: ^2.10.1
+        version: 2.10.1(three@0.182.0)
       polygon-clipping:
         specifier: ^0.15.7
         version: 0.15.7
+      three:
+        specifier: ^0.182.0
+        version: 0.182.0
       three-bvh-csg:
         specifier: ^0.0.17
         version: 0.0.17(three-mesh-bvh@0.7.0(three@0.182.0))(three@0.182.0)

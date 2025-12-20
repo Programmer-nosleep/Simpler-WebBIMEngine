@@ -147,7 +147,7 @@ export class PolygonTool {
 			this.scene.add(this.previewMesh);
 		}
 
-		this.previewMesh.position.copy(center);
+		this.previewMesh.position.set(center.x, -0.5, center.z);
 		this.previewMesh.scale.set(radius, 1, radius);
 	}
 
@@ -273,4 +273,3 @@ export class PolygonTool {
 		setTimeout(() => input.focus(), 10);
 	}
 }
-
