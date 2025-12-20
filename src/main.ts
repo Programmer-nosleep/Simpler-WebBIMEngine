@@ -8,6 +8,7 @@ import { type CameraProjectionMode, createCameraScene } from "../components/Came
 import { setupGrid } from "../components/Grid";
 import { AxesWorld } from "../utils/axesWorld";
 import { setupLeftSidebar } from "../components/ui/LeftSidebar";
+import { setupRightSidebar } from "../components/ui/RightSidebar";
 import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
@@ -32,6 +33,11 @@ const init = async () => {
 	const leftSidebar = setupLeftSidebar(undefined, {
 		onDefault: () => elevationControls?.setPerspective(),
 		onElevation: (dir) => elevationControls?.setElevationView(dir),
+	});
+	const rightSidebar = setupRightSidebar(document.getElementById("rightSidebar")!, {
+		onUnitChange: (u) => console.log("unit", u),
+		onToleranceChange: (v) => console.log("tolerance", v),
+		onParallelSnapChange: (v) => console.log("parallel", v),
 	});
 	const container = document.getElementById("threejs");
 	if (!container) throw new Error("Container element #threejs tidak ditemukan");

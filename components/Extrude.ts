@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import { buildExtrusionGeometry } from "../helpers/csg";
+import {
+  buildExtrusionGeometry,
+  disposeCachedHollowSolids,
+  getHollowExtrusionMeta,
+  mergeHollowExtrusionsToTargetLocal,
+} from "../helpers/csg";
 import { getCoplanarFaceRegionLocalToRoot, type FaceRegion } from "../utils/faceRegion";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
@@ -57,6 +62,8 @@ export class ExtrudeTool {
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
   private active: ActiveExtrudeState | null = null;
+  private tempBoxA = new THREE.Box3();
+  private tempBoxB = new THREE.Box3();
 
   constructor(
     camera: THREE.Camera | (() => THREE.Camera),
@@ -168,7 +175,7 @@ export class ExtrudeTool {
 
     if (!selectedMesh || !hit) return;
 
-    const shape = this.getShapeFromGeometry(selectedMesh.geometry);
+    const shape = this.getShapeFromMesh(selectedMesh);
     if (!shape) {
       console.warn("[ExtrudeTool] Selected mesh has no Shape/Extrude parameters.");
       return;
@@ -507,7 +514,16 @@ export class ExtrudeTool {
       const ud: any = state.mesh.userData || {};
       ud.extrudeDepth = state.lastDepth;
       ud.extrudeHollow = state.lastHollow;
+      ud.extrudeWallThickness = this.options.wallThickness ?? 0.15;
+      ud.extrudeFloorThickness = this.options.floorThickness ?? 0.1;
+      ud.extrudeExtraCut = 0.1;
+      ud.extrudeShape = state.shape;
+      ud.isExtruded = true;
       state.mesh.userData = ud;
+
+      if (state.lastHollow) {
+        this.tryMergeHollowMeshes(state.mesh);
+      }
 
       this.updateEdgesHelper(state.mesh);
 
@@ -532,6 +548,97 @@ export class ExtrudeTool {
     }
   }
 
+  private tryMergeHollowMeshes(target: THREE.Mesh) {
+    const defaults = {
+      wallThickness: this.options.wallThickness ?? 0.15,
+      floorThickness: this.options.floorThickness ?? 0.1,
+      extraCut: 0.1,
+    };
+
+    const targetMeta = getHollowExtrusionMeta(target, defaults);
+    if (!targetMeta) return;
+
+    const scene = this.options.getScene();
+    target.updateWorldMatrix(true, true);
+    this.tempBoxA.setFromObject(target);
+
+    const epsilon = 1e-4;
+    const metas = [targetMeta];
+    const toRemove: THREE.Mesh[] = [];
+
+    scene.traverse((obj) => {
+      if (obj === target) return;
+      const anyObj = obj as any;
+      if (!anyObj.isMesh) return;
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.visible) return;
+      if ((mesh.userData as any)?.isHelper) return;
+      if ((mesh.userData as any)?.selectable === false) return;
+
+      const meta = getHollowExtrusionMeta(mesh, defaults);
+      if (!meta) return;
+
+      if (Math.abs(meta.depth - targetMeta.depth) > epsilon) return;
+      if (Math.abs(meta.wallThickness - targetMeta.wallThickness) > epsilon) return;
+      if (Math.abs(meta.floorThickness - targetMeta.floorThickness) > epsilon) return;
+      if (Math.abs(meta.extraCut - targetMeta.extraCut) > epsilon) return;
+
+      mesh.updateWorldMatrix(true, true);
+      this.tempBoxB.setFromObject(mesh);
+      if (!this.tempBoxA.intersectsBox(this.tempBoxB)) return;
+
+      metas.push(meta);
+      toRemove.push(mesh);
+    });
+
+    if (metas.length <= 1) return;
+
+    const merged = mergeHollowExtrusionsToTargetLocal(target, metas);
+    if (!merged) return;
+
+    const prev = target.geometry;
+    target.geometry = merged;
+    try {
+      prev.dispose();
+    } catch {
+      // ignore
+    }
+
+    const ud: any = target.userData || {};
+    ud.extrudeMerged = true;
+    delete ud.extrudeShape; // merged shape no longer a single Shape
+    target.userData = ud;
+
+    for (const mesh of toRemove) {
+      disposeCachedHollowSolids(mesh);
+      try {
+        mesh.removeFromParent();
+      } catch {
+        // ignore
+      }
+
+      mesh.traverse((child: any) => {
+        if (child.geometry?.dispose) {
+          try {
+            child.geometry.dispose();
+          } catch {
+            // ignore
+          }
+        }
+        if (child.material) {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((mat: any) => {
+            try {
+              mat.dispose?.();
+            } catch {
+              // ignore
+            }
+          });
+        }
+      });
+    }
+  }
+
   private cancelActiveExtrude() {
     if (!this.active) return;
     this.finishActiveExtrude({ commit: false });
@@ -549,7 +656,7 @@ export class ExtrudeTool {
   private findExtrudableMesh(obj: THREE.Object3D): THREE.Mesh | null {
     if ((obj as any).isMesh) {
       const mesh = obj as THREE.Mesh;
-      return this.getShapeFromGeometry(mesh.geometry) ? mesh : null;
+      return this.getShapeFromMesh(mesh) ? mesh : null;
     }
 
     let found: THREE.Mesh | null = null;
@@ -558,7 +665,7 @@ export class ExtrudeTool {
       if (!(child as any).isMesh) return;
       const mesh = child as THREE.Mesh;
       if ((mesh.userData as any)?.selectable === false) return;
-      if (this.getShapeFromGeometry(mesh.geometry)) found = mesh;
+      if (this.getShapeFromMesh(mesh)) found = mesh;
     });
     return found;
   }
@@ -576,6 +683,13 @@ export class ExtrudeTool {
 
     if (typeof (shapes as any).getPoints === "function") return shapes as THREE.Shape;
     return null;
+  }
+
+  private getShapeFromMesh(mesh: THREE.Mesh): THREE.Shape | null {
+    const ud: any = mesh.userData || {};
+    const stored = ud.extrudeShape as unknown;
+    if (stored && typeof (stored as any).getPoints === "function") return stored as THREE.Shape;
+    return this.getShapeFromGeometry(mesh.geometry as THREE.BufferGeometry);
   }
 
   private getDepthFromMesh(mesh: THREE.Mesh): number {

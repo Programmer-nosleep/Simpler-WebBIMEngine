@@ -45,7 +45,7 @@
           </div>
         </div>
 
-        <!-- Export (SEBARIS) -->
+        <!-- Export -->
         <div class="control-panel">
           <label for="exporterFormat">Export</label>
           <div class="control-row">
@@ -57,24 +57,21 @@
             <button id="exportButton" type="button">Export</button>
           </div>
         </div>
-
-        <!-- Timeline (optional, kalau ada) -->
-        <!--
-        <div class="control-panel">
-          <label>Timeline</label>
-          <div class="timeline-row">
-            <input type="range" min="0" max="100" value="50" />
-            <span>11:03</span>
-          </div>
-        </div>
-        -->
       </div>
     </div>
 
-    <!-- SIDEBAR TERPISAH -->
-    <aside id="ui-sidebar" aria-label="Project views sidebar wrapper">
-      <aside id="leftSidebar" aria-label="Project views sidebar"></aside>
-    </aside>
+    <!-- UI OVERLAY (sidebar kiri + kanan) -->
+    <div id="ui-overlay" aria-label="UI overlay">
+      <!-- SIDEBAR KIRI -->
+      <aside id="ui-sidebar-left" class="ui-sidebar" aria-label="Project views sidebar wrapper">
+        <div id="leftSidebar" aria-label="Project views sidebar"></div>
+      </aside>
+
+      <!-- SIDEBAR KANAN -->
+      <aside id="ui-sidebar-right" class="ui-sidebar" aria-label="Project properties sidebar wrapper">
+        <div id="rightSidebar" aria-label="Project properties sidebar"></div>
+      </aside>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

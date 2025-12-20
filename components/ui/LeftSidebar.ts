@@ -1,4 +1,4 @@
-type IconName = "chevron" | "plus" | "eye" | "grid";
+type IconName = "chevron" | "plus" | "eye" | "grid" | "close";
 
 const ICONS: Record<IconName, string> = {
   chevron: `<svg viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg">
@@ -14,6 +14,9 @@ const ICONS: Record<IconName, string> = {
   grid: `<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
     <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" stroke-width="1.2" fill="none"/>
     <path d="M7.5 2.5V13.5M2.5 7.5H13.5" stroke="currentColor" stroke-width="1.2"/>
+  </svg>`,
+  close: `<svg viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 3L9 9M9 3L3 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`,
 };
 
@@ -75,6 +78,33 @@ export function setupLeftSidebar(root?: HTMLElement, callbacks?: LeftSidebarCall
   container.innerHTML = "";
   container.setAttribute("role", "navigation");
   container.setAttribute("aria-label", "Project views");
+
+  // Header dengan tombol close
+  const header = document.createElement("div");
+  header.style.display = "flex";
+  header.style.alignItems = "center";
+  header.style.justifyContent = "space-between"; // Title kiri, Close kanan
+  header.style.padding = "12px 16px";
+
+  const titleEl = document.createElement("h2");
+  titleEl.textContent = "View";
+  titleEl.style.margin = "0";
+  titleEl.style.fontSize = "16px";
+  titleEl.style.fontWeight = "600";
+  header.appendChild(titleEl);
+
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.title = "Close Sidebar";
+  closeBtn.style.background = "transparent";
+  closeBtn.style.border = "none";
+  closeBtn.style.cursor = "pointer";
+  closeBtn.style.color = "inherit";
+  closeBtn.appendChild(createIconElement("close"));
+  closeBtn.addEventListener("click", () => window.dispatchEvent(new CustomEvent("sidebar-toggle-left")));
+  
+  header.appendChild(closeBtn);
+  container.appendChild(header);
 
   let sectionListRef: HTMLUListElement | null = null;
   let sectionAddButton: HTMLButtonElement | null = null;

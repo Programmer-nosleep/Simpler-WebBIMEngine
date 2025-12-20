@@ -2,6 +2,12 @@
 
 import * as THREE from "three";
 import { SnappingHelper } from "../helpers/snapping-helper";
+import {
+  disposeCachedHollowSolids,
+  getHollowExtrusionMeta,
+  mergeHollowExtrusionsToTargetLocal,
+} from "../helpers/csg";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 export class MoveTool {
   private scene: THREE.Scene;
@@ -14,6 +20,8 @@ export class MoveTool {
   private plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // XY Plane
   private snappingHelper: SnappingHelper;
   private tempVec3 = new THREE.Vector3();
+  private tempBoxA = new THREE.Box3();
+  private tempBoxB = new THREE.Box3();
 
   // State
   private selectedObject: THREE.Object3D | null = null;
@@ -236,11 +244,143 @@ export class MoveTool {
   }
 
   private finishMove() {
+    if (this.selectedObject && (this.selectedObject as any).isMesh) {
+      this.tryMergeHollowMeshes(this.selectedObject as THREE.Mesh);
+    }
     this.isDragging = false;
     this.selectedObject = null;
     this.ignoreIds.clear();
     this.container.style.cursor = "grab";
     this.cleanupVisuals();
+  }
+
+  private tryMergeHollowMeshes(target: THREE.Mesh) {
+    const targetMeta = getHollowExtrusionMeta(target);
+    if (!targetMeta) return;
+
+    target.updateWorldMatrix(true, true);
+    this.tempBoxA.setFromObject(target);
+
+    const epsilon = 1e-4;
+    const metas = [targetMeta];
+    const toRemove: THREE.Mesh[] = [];
+
+    this.scene.traverse((obj) => {
+      if (obj === target) return;
+      const anyObj = obj as any;
+      if (!anyObj.isMesh) return;
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.visible) return;
+      if ((mesh.userData as any)?.isHelper) return;
+      if ((mesh.userData as any)?.selectable === false) return;
+
+      const meta = getHollowExtrusionMeta(mesh);
+      if (!meta) return;
+
+      if (Math.abs(meta.depth - targetMeta.depth) > epsilon) return;
+      if (Math.abs(meta.wallThickness - targetMeta.wallThickness) > epsilon) return;
+      if (Math.abs(meta.floorThickness - targetMeta.floorThickness) > epsilon) return;
+      if (Math.abs(meta.extraCut - targetMeta.extraCut) > epsilon) return;
+
+      mesh.updateWorldMatrix(true, true);
+      this.tempBoxB.setFromObject(mesh);
+      if (!this.tempBoxA.intersectsBox(this.tempBoxB)) return;
+
+      metas.push(meta);
+      toRemove.push(mesh);
+    });
+
+    if (metas.length <= 1) return;
+
+    const merged = mergeHollowExtrusionsToTargetLocal(target, metas);
+    if (!merged) return;
+
+    const prev = target.geometry;
+    target.geometry = merged;
+    try {
+      prev.dispose();
+    } catch {
+      // ignore
+    }
+
+    const ud: any = target.userData || {};
+    ud.extrudeMerged = true;
+    delete ud.extrudeShape;
+    target.userData = ud;
+
+    this.refreshExtrudeEdgesHelper(target);
+
+    for (const mesh of toRemove) {
+      disposeCachedHollowSolids(mesh);
+      try {
+        mesh.removeFromParent();
+      } catch {
+        // ignore
+      }
+
+      mesh.traverse((child: any) => {
+        if (child.geometry?.dispose) {
+          try {
+            child.geometry.dispose();
+          } catch {
+            // ignore
+          }
+        }
+        if (child.material) {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((mat: any) => {
+            try {
+              mat.dispose?.();
+            } catch {
+              // ignore
+            }
+          });
+        }
+      });
+    }
+  }
+
+  private refreshExtrudeEdgesHelper(mesh: THREE.Mesh) {
+    const ud: any = mesh.userData || {};
+    const prev = ud.__extrudeEdges as THREE.LineSegments | undefined;
+    if (prev) {
+      prev.removeFromParent();
+      try {
+        (prev.geometry as THREE.BufferGeometry).dispose();
+      } catch { }
+      try {
+        (prev.material as THREE.Material).dispose();
+      } catch { }
+      delete ud.__extrudeEdges;
+    }
+
+    const baseGeometry = mesh.geometry as THREE.BufferGeometry | undefined;
+    const position = baseGeometry?.getAttribute("position") as THREE.BufferAttribute | undefined;
+
+    let edges: THREE.EdgesGeometry;
+    if (baseGeometry && position) {
+      const temp = new THREE.BufferGeometry();
+      temp.setAttribute("position", position);
+      if (baseGeometry.index) temp.setIndex(baseGeometry.index);
+      const welded = mergeVertices(temp, 1e-4);
+      temp.dispose();
+      edges = new THREE.EdgesGeometry(welded, 25);
+      welded.dispose();
+    } else {
+      edges = new THREE.EdgesGeometry(mesh.geometry, 25);
+    }
+
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x1f1f1f,
+      depthWrite: false,
+      depthTest: true,
+    });
+    const helper = new THREE.LineSegments(edges, mat);
+    helper.renderOrder = 2;
+    helper.userData = { selectable: false, isHelper: true, isExtrudeOutline: true };
+    mesh.add(helper);
+    ud.__extrudeEdges = helper;
+    mesh.userData = ud;
   }
 
   private cancelMove() {
