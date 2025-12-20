@@ -10,6 +10,7 @@ export type ExtrudeToolOptions = {
   getControls?: () => ControlsLike | null;
   getScene: () => THREE.Scene;
   onHover?: (object: THREE.Object3D | null, faceIndex: number | null) => void;
+  onPickFace?: (object: THREE.Object3D, normal?: THREE.Vector3) => void;
   wallThickness?: number;
   floorThickness?: number;
 };
@@ -174,6 +175,23 @@ export class ExtrudeTool {
     if (hit.face && hit.face.normal) {
       // Transform local normal to world
       axisVector = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
+    }
+
+    // Update selection overlay to the clicked face (single-face selection).
+    try {
+      const root = this.findSelectableRoot(selectedMesh);
+      if (hit.face?.normal) {
+        const normalWorld = hit.face.normal
+          .clone()
+          .transformDirection(selectedMesh.matrixWorld)
+          .normalize();
+        const normalLocalToRoot = this.worldNormalToLocal(root, normalWorld);
+        this.options.onPickFace?.(root, normalLocalToRoot);
+      } else {
+        this.options.onPickFace?.(root, undefined);
+      }
+    } catch {
+      // ignore
     }
 
     const dragPlane = this.computeDragPlane(axisVector, hit.point.clone());
@@ -689,5 +707,21 @@ export class ExtrudeTool {
       ud.isExtruded = true;
       mesh.userData = ud;
     }
+  }
+
+  private findSelectableRoot(obj: THREE.Object3D): THREE.Object3D {
+    let current: THREE.Object3D | null = obj;
+    while (current && current.parent) {
+      if ((current.userData as any)?.selectable === true) return current;
+      current = current.parent;
+    }
+    return obj;
+  }
+
+  private worldNormalToLocal(root: THREE.Object3D, normalWorld: THREE.Vector3): THREE.Vector3 {
+    const invRootQuat = new THREE.Quaternion();
+    root.getWorldQuaternion(invRootQuat);
+    invRootQuat.invert();
+    return normalWorld.clone().applyQuaternion(invRootQuat).normalize();
   }
 }

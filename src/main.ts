@@ -98,6 +98,7 @@ const init = async () => {
 		getControls: () => cameraScene.camera.controls as any,
 		getScene: () => cameraScene.scene,
 		onHover: (obj, idx) => faceSelection.setHovered(obj, idx),
+		onPickFace: (obj, normal) => selectionSystem.setPrimaryFace(obj, normal),
 		wallThickness: 0.15,
 		floorThickness: 0.1,
 	});
@@ -242,6 +243,8 @@ const setupSelectionSystem = (
 	const scene = cameraScene.scene;
 	const selectedObjects = new Set<THREE.Object3D>();
 	const selectionColor = new THREE.Color(0x4f8cff);
+	let primarySelectedObject: THREE.Object3D | null = null;
+	let primarySelectedNormal: THREE.Vector3 | null = null;
 
 	const isSelectableRoot = (object: THREE.Object3D) =>
 		(object.userData as { selectable?: boolean } | undefined)?.selectable === true;
@@ -255,10 +258,25 @@ const setupSelectionSystem = (
 	};
 
 	const syncFaceSelection = (primaryObject?: THREE.Object3D, primaryNormal?: THREE.Vector3) => {
+		if (primaryObject) {
+			primarySelectedObject = primaryObject;
+			primarySelectedNormal = primaryNormal ? primaryNormal.clone() : null;
+		}
+
+		if (primarySelectedObject && !selectedObjects.has(primarySelectedObject)) {
+			primarySelectedObject = null;
+			primarySelectedNormal = null;
+		}
+
+		if (!primarySelectedObject && selectedObjects.size > 0) {
+			primarySelectedObject = selectedObjects.values().next().value ?? null;
+			primarySelectedNormal = null;
+		}
+
 		if (selectedObjects.size > 0) {
 			const items = Array.from(selectedObjects).map((obj) => {
-				if (obj === primaryObject && primaryNormal) {
-					return { object: obj, normal: primaryNormal };
+				if (obj === primarySelectedObject && primarySelectedNormal) {
+					return { object: obj, normal: primarySelectedNormal };
 				}
 				return { object: obj };
 			});
@@ -372,6 +390,8 @@ const setupSelectionSystem = (
 	const clearSelection = () => {
 		selectedObjects.forEach((obj) => setObjectSelection(obj, false));
 		selectedObjects.clear();
+		primarySelectedObject = null;
+		primarySelectedNormal = null;
 		syncFaceSelection();
 	};
 
@@ -392,6 +412,10 @@ const setupSelectionSystem = (
 		if (selectedObjects.has(object)) {
 			setObjectSelection(object, false);
 			selectedObjects.delete(object);
+			if (primarySelectedObject === object) {
+				primarySelectedObject = selectedObjects.values().next().value ?? null;
+				primarySelectedNormal = null;
+			}
 			syncFaceSelection();
 		} else {
 			setObjectSelection(object, true);
@@ -418,6 +442,19 @@ const setupSelectionSystem = (
 		const hit = hits[0];
 		const root = hit ? findSelectableRoot(hit.object) : null;
 
+		const faceNormalToRoot = (intersection: THREE.Intersection, targetRoot: THREE.Object3D) => {
+			if (!intersection.face?.normal) return undefined;
+			const worldNormal = intersection.face.normal
+				.clone()
+				.transformDirection(intersection.object.matrixWorld)
+				.normalize();
+
+			const invRootQuat = new THREE.Quaternion();
+			targetRoot.getWorldQuaternion(invRootQuat);
+			invRootQuat.invert();
+			return worldNormal.applyQuaternion(invRootQuat).normalize();
+		};
+
 		const now = performance.now();
 		const isDoubleClick = (now - lastClickTime) < DOUBLE_CLICK_DELAY;
 		lastClickTime = now;
@@ -428,14 +465,14 @@ const setupSelectionSystem = (
 		}
 
 		if (event.shiftKey) {
-			toggleObjectSelection(root, hit.face?.normal);
+			toggleObjectSelection(root, hit ? faceNormalToRoot(hit, root) : undefined);
 		} else {
 			if (isDoubleClick) {
 				// Double click: Select whole object (no normal restriction)
 				selectSingleObject(root, undefined);
 			} else {
 				// Single click: Select specific face
-				selectSingleObject(root, hit.face?.normal);
+				selectSingleObject(root, hit ? faceNormalToRoot(hit, root) : undefined);
 			}
 		}
 	};
@@ -448,6 +485,14 @@ const setupSelectionSystem = (
 		syncFaceSelection,
 		currentTool: "select" as DockToolId,
 		clearSelection,
+		selectSingle: (object: THREE.Object3D, normal?: THREE.Vector3) => selectSingleObject(object, normal),
+		setPrimaryFace: (object: THREE.Object3D, normal?: THREE.Vector3) => {
+			if (!selectedObjects.has(object)) {
+				selectSingleObject(object, normal);
+				return;
+			}
+			syncFaceSelection(object, normal);
+		},
 		selectAll: () => {
 			const roots = getSelectableRoots();
 			selectedObjects.forEach((obj) => setObjectSelection(obj, false));

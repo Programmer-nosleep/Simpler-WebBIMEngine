@@ -256,12 +256,16 @@ export class MoveTool {
   // Helper to find the root selectable object (e.g. Cube) when clicking a child (e.g. Outline)
   private getSelectableObject(object: THREE.Object3D): THREE.Object3D | null {
     let current: THREE.Object3D | null = object;
+    let selectableRoot: THREE.Object3D | null = null;
     
     // 1. Traverse up to find explicitly selectable parent
     while (current && current !== this.scene) {
-      if (current.userData.selectable === true) return current;
+      if (current.userData.selectable === true) selectableRoot = current;
       current = current.parent;
     }
+
+    // Prefer the top-most selectable root (so we move the object, not a child mesh)
+    if (selectableRoot) return selectableRoot;
 
     // 2. If the object itself is explicitly unselectable, return null
     if (object.userData.selectable === false) return null;

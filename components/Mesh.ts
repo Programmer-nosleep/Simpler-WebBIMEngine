@@ -110,12 +110,31 @@ export class MeshLoader extends OBC.Component implements OBC.Disposable {
             object.position.copy(options.position);
         }
 
+        const defaultType = (object as any).isMesh ? "imported_mesh" : "imported_root";
+
+        // Make the imported object selectable as a single unit (root),
+        // so MoveTool moves the object instead of "separating" child meshes.
+        object.userData = {
+            ...object.userData,
+            selectable: true,
+            entityType: (object.userData as any)?.entityType ?? "imported",
+            type: (object.userData as any)?.type ?? defaultType,
+        };
+
         object.traverse((child) => {
             if ((child as any).isMesh) {
                 child.castShadow = true;
                 child.receiveShadow = true;
-                child.userData.selectable = true;
-                child.userData.type = "imported_mesh";
+
+                // Child meshes should not become selectable roots; selection/move should
+                // resolve to the imported root object. Keep them pickable via raycast.
+                if (child !== object && (child.userData as any)?.selectable === true) {
+                    delete (child.userData as any).selectable;
+                }
+
+                if (child !== object) {
+                    child.userData.type = "imported_mesh";
+                }
             }
         });
 

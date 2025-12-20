@@ -46,7 +46,6 @@ export class LineTool {
   // Constants
   private readonly SNAP_THRESHOLD = 0.3;
   private readonly AXIS_SNAP_PIXELS = 15;
-  private readonly SURFACE_OFFSET = 0.001;
 
   constructor(
     scene: THREE.Scene,
@@ -555,7 +554,6 @@ export class LineTool {
     const mesh = new THREE.Mesh(geometry, material);
     const basis = new THREE.Matrix4().makeBasis(u, v, normal).setPosition(origin);
     mesh.applyMatrix4(basis);
-    mesh.position.addScaledVector(normal, this.SURFACE_OFFSET);
 
     const edges = new THREE.EdgesGeometry(geometry);
     const outline = new THREE.LineSegments(
@@ -565,7 +563,6 @@ export class LineTool {
     outline.userData.selectable = false;
     outline.userData.isFaceOutline = true;
     outline.renderOrder = 1;
-    outline.position.z += this.SURFACE_OFFSET;
     mesh.add(outline);
     (mesh.userData as any).__faceOutline = outline;
 
@@ -1092,12 +1089,12 @@ export class LineTool {
         object = mesh;
       } else {
         const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
-        const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+        const material = new THREE.LineBasicMaterial({ color: 0x000000, depthWrite: false });
         object = new THREE.Line(geometry, material);
       }
     } else {
       const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
-      const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+      const material = new THREE.LineBasicMaterial({ color: 0x000000, depthWrite: false });
       object = new THREE.Line(geometry, material);
     }
 
@@ -1109,13 +1106,7 @@ export class LineTool {
     }
 
     if ((object as THREE.Line).isLine) {
-      const planarEps = 1e-3;
-      const isPlanarToActivePlane = this.points.every(
-        (p) => Math.abs(this.plane.distanceToPoint(p)) < planarEps
-      );
-      if (isPlanarToActivePlane) {
-        object.position.addScaledVector(this.plane.normal, this.SURFACE_OFFSET);
-      }
+      object.renderOrder = 2;
     }
 
     object.userData.selectable = true;

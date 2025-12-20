@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
-// import { createCornerConnectors, createEdgesOverlay, disposeObjectDeep } from "../helpers/threeHelpers";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 export type FaceSelectionOptions = {
   scene: THREE.Scene;
@@ -47,10 +47,6 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   const objectBounds = objectGeometry.boundingBox;
   if (!objectBounds) throw new Error("Object bounding box tidak tersedia");
   const objectBox: THREE.Box3 = objectBounds;
-  const objectSize = new THREE.Vector3();
-  objectBounds.getSize(objectSize);
-  const objectCenter = new THREE.Vector3();
-  objectBounds.getCenter(objectCenter);
 
   const dotsMaterial = new THREE.PointsMaterial({
     color: dotColor,
@@ -63,6 +59,143 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     linewidth: borderLineWidth,
     depthWrite: false,
   });
+
+  const boundsBoxWorld = new THREE.Box3();
+  const boundsBoxLocal = new THREE.Box3();
+  const boundsInverseMatrix = new THREE.Matrix4();
+  const boundsCorners = Array.from({ length: 8 }, () => new THREE.Vector3());
+  const edgesPositionsCache = new WeakMap<THREE.BufferGeometry, Float32Array>();
+  const tempChildBox = new THREE.Box3();
+
+  function getEdgesPositions(geometry: THREE.BufferGeometry): Float32Array {
+    const cached = edgesPositionsCache.get(geometry);
+    if (cached) return cached;
+
+    const merged = geometry.index ? null : mergeVertices(geometry);
+    const source = merged ?? geometry;
+    const edges = new THREE.EdgesGeometry(source);
+    const positions = (edges.attributes.position.array as Float32Array).slice();
+    edges.dispose();
+    merged?.dispose();
+
+    edgesPositionsCache.set(geometry, positions);
+    return positions;
+  }
+
+  function getLocalBounds(object: THREE.Object3D): THREE.Box3 | null {
+    // Prefer geometry bounds for meshes (accurate in local space).
+    if ((object as any).isMesh) {
+      const mesh = object as THREE.Mesh;
+      const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+      if (geom) {
+        if (!geom.boundingBox) geom.computeBoundingBox();
+        if (geom.boundingBox) return geom.boundingBox.clone();
+      }
+    }
+
+    // Fallback: world AABB converted into object-local space (works for groups/lines).
+    // Exclude helper overlays; otherwise the selection overlay becomes part of the
+    // measured bounds and can "grow" every pointer move.
+    object.updateWorldMatrix(true, true);
+
+    const isUnderHelper = (obj: THREE.Object3D) => {
+      let current: THREE.Object3D | null = obj;
+      while (current) {
+        if ((current.userData as any)?.isHelper) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+
+    boundsBoxWorld.makeEmpty();
+    object.traverse((child) => {
+      if (child.name === "SkyDome" || child.name === "Grid" || child.name === "AxesWorld") return;
+      if (isUnderHelper(child)) return;
+
+      if ((child as any).isMesh) {
+        const mesh = child as THREE.Mesh;
+        const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+        if (!geom) return;
+        if (!geom.boundingBox) geom.computeBoundingBox();
+        if (!geom.boundingBox) return;
+        tempChildBox.copy(geom.boundingBox).applyMatrix4(mesh.matrixWorld);
+        boundsBoxWorld.union(tempChildBox);
+        return;
+      }
+
+      if ((child as any).isLine || (child as any).isLineSegments || (child as any).isPoints) {
+        const geom = (child as any).geometry as THREE.BufferGeometry | undefined;
+        if (!geom) return;
+        const pos = geom.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (!pos) return;
+        tempChildBox.setFromBufferAttribute(pos).applyMatrix4(child.matrixWorld);
+        boundsBoxWorld.union(tempChildBox);
+      }
+    });
+
+    if (boundsBoxWorld.isEmpty()) return null;
+
+    boundsInverseMatrix.copy(object.matrixWorld).invert();
+
+    const min = boundsBoxWorld.min;
+    const max = boundsBoxWorld.max;
+    boundsCorners[0].set(min.x, min.y, min.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[1].set(min.x, min.y, max.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[2].set(min.x, max.y, min.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[3].set(min.x, max.y, max.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[4].set(max.x, min.y, min.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[5].set(max.x, min.y, max.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[6].set(max.x, max.y, min.z).applyMatrix4(boundsInverseMatrix);
+    boundsCorners[7].set(max.x, max.y, max.z).applyMatrix4(boundsInverseMatrix);
+
+    boundsBoxLocal.makeEmpty();
+    for (const corner of boundsCorners) boundsBoxLocal.expandByPoint(corner);
+    return boundsBoxLocal.clone();
+  }
+
+  function createBoxEdgePathPositions(box: THREE.Box3): number[] {
+    const min = box.min;
+    const max = box.max;
+
+    const c000 = new THREE.Vector3(min.x, min.y, min.z);
+    const c100 = new THREE.Vector3(max.x, min.y, min.z);
+    const c101 = new THREE.Vector3(max.x, min.y, max.z);
+    const c001 = new THREE.Vector3(min.x, min.y, max.z);
+
+    const c010 = new THREE.Vector3(min.x, max.y, min.z);
+    const c110 = new THREE.Vector3(max.x, max.y, min.z);
+    const c111 = new THREE.Vector3(max.x, max.y, max.z);
+    const c011 = new THREE.Vector3(min.x, max.y, max.z);
+
+    // A continuous polyline that stays on the box edges (may repeat some edges).
+    const path = [
+      c000,
+      c100,
+      c101,
+      c001,
+      c000,
+      c010,
+      c110,
+      c111,
+      c011,
+      c010,
+      c110,
+      c100,
+      c110,
+      c111,
+      c101,
+      c111,
+      c011,
+      c001,
+      c011,
+      c010,
+      c000,
+    ];
+
+    const positions: number[] = [];
+    for (const p of path) positions.push(p.x, p.y, p.z);
+    return positions;
+  }
 
   function updateBorderResolution() {
     if (canvas.width <= 0 || canvas.height <= 0) return;
@@ -267,18 +400,22 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         border.renderOrder = 3;
         group.add(border);
 
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.add(group);
-        } else {
-          scene.add(group);
-        }
+        group.userData.isHelper = true;
+        group.userData.selectable = false;
+        obj.add(group);
+
+        // Prevent overlays from interfering with scene raycasts.
+        group.traverse((child) => {
+          child.userData.isHelper = true;
+          child.userData.selectable = false;
+          (child as any).raycast = () => { };
+        });
 
         overlay = { group, dots, border };
         activeOverlays.set(obj.id, overlay);
-
-        // Generate Geometry
-        updateOverlayGeometry(obj, overlay, item.normal);
       }
+
+      updateOverlayGeometry(obj, overlay, item.normal);
 
       // Update visibility
       overlay.group.visible = true;
@@ -349,22 +486,26 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         overlay.dots.geometry.dispose();
         overlay.dots.geometry = mergedDotsGeo;
 
-        const edges = new THREE.EdgesGeometry(objectGeometry);
         const lineGeo = new LineGeometry();
-        lineGeo.setPositions(edges.attributes.position.array as Float32Array);
+        lineGeo.setPositions(getEdgesPositions(objectGeometry));
         overlay.border.geometry.dispose();
         overlay.border.geometry = lineGeo;
       }
     } else {
-      const mesh = obj as THREE.Mesh;
+      const bounds = getLocalBounds(obj);
+      if (!bounds) {
+        overlay.dots.visible = false;
+        overlay.border.visible = false;
+        return;
+      }
 
-      // Compute mesh logical bounds for face calculation
-      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-      const meshBox = mesh.geometry.boundingBox || new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
+      const isMesh = (obj as any).isMesh === true;
+      const mesh = isMesh ? (obj as THREE.Mesh) : null;
 
-      if (normal) {
+      // Only apply face-normal overlay for real meshes.
+      if (mesh && normal) {
         // Single Face Selection
-        const faceInfo = getFaceInfoFromNormal(normal, meshBox);
+        const faceInfo = getFaceInfoFromNormal(normal, bounds);
 
         overlay.group.position
           .copy(faceInfo.center)
@@ -372,37 +513,65 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         overlay.group.rotation.copy(faceInfo.rotation);
         overlay.group.scale.set(1, 1, 1);
 
+        overlay.dots.visible = true;
+        overlay.border.visible = true;
+
         overlay.dots.geometry.dispose();
         overlay.dots.geometry = createDotsGeometry(faceInfo.width, faceInfo.height, DOT_SPACING);
 
         overlay.border.geometry.dispose();
         overlay.border.geometry = createBorderGeometry(faceInfo.width, faceInfo.height);
-
       } else {
-        // Whole Object Selection - Use helpers from threeHelpers
+        // Whole Object Selection (built-in): dots on all AABB faces + outline
         overlay.group.position.set(0, 0, 0);
         overlay.group.rotation.set(0, 0, 0);
         overlay.group.scale.set(1, 1, 1);
+        overlay.dots.visible = true;
+        overlay.border.visible = true;
 
-        // Remove old custom dots/border logic if present in this group
-        overlay.dots.visible = false;
-        overlay.border.visible = false;
+        const allDotsPositions: number[] = [];
+        const normals = [
+          new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0),
+          new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0),
+          new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)
+        ];
 
-        // Clear previous children that might be our helpers
-        for (let i = overlay.group.children.length - 1; i >= 0; i--) {
-          const child = overlay.group.children[i];
-          if ((child as any).userData?.isEdgesOverlay || (child as any).userData?.isConnectorsGroup) {
-            overlay.group.remove(child);
-            disposeObjectDeep(child);
+        const v = new THREE.Vector3();
+        for (const n of normals) {
+          const info = getFaceInfoFromNormal(n, bounds);
+          const dotsGeo = createDotsGeometry(info.width, info.height, DOT_SPACING);
+          const posAttr = dotsGeo.getAttribute("position");
+          const offset = n.clone().multiplyScalar(SURFACE_OFFSET);
+
+          for (let i = 0; i < posAttr.count; i++) {
+            v.fromBufferAttribute(posAttr, i);
+            v.applyEuler(info.rotation);
+            v.add(info.center);
+            v.add(offset);
+            allDotsPositions.push(v.x, v.y, v.z);
           }
+          dotsGeo.dispose();
         }
 
-        // Create new overlays - Use robust specific helper
-        const edges = createEdgesOverlay(obj, { color: 0x00ff00, linewidth: 2, depthTest: false });
-        overlay.group.add(edges);
+        const mergedDotsGeo = new THREE.BufferGeometry();
+        mergedDotsGeo.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(allDotsPositions, 3)
+        );
+        overlay.dots.geometry.dispose();
+        overlay.dots.geometry = mergedDotsGeo;
 
-        const connectors = createCornerConnectors(obj, { color: 0x00ff00, size: 0.075 });
-        overlay.group.add(connectors);
+        overlay.border.geometry.dispose();
+
+        if (mesh && mesh.geometry) {
+          const lineGeo = new LineGeometry();
+          lineGeo.setPositions(getEdgesPositions(mesh.geometry));
+          overlay.border.geometry = lineGeo;
+        } else {
+          const lineGeo = new LineGeometry();
+          lineGeo.setPositions(createBoxEdgePathPositions(bounds));
+          overlay.border.geometry = lineGeo;
+        }
       }
     }
   }
