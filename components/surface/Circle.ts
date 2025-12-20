@@ -106,8 +106,8 @@ export class CircleTool {
 			geometry.rotateX(-Math.PI / 2);
 			const material = new THREE.MeshBasicMaterial({
 				color: 0x99ccff,
-				transparent: true,
-				opacity: 0.5,
+				// transparent: true,
+				opacity: 1.0,
 				side: THREE.DoubleSide,
 			});
 			this.previewMesh = new THREE.Mesh(geometry, material);
