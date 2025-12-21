@@ -17,6 +17,7 @@
     "@thatopen/components": "^3.2.6",
     "@thatopen/fragments": "^3.2.13",
     "camera-controls": "^2.10.1",
+    "flatbuffers": "^25.2.10",
     "polygon-clipping": "^0.15.7",
     "three": "^0.182.0",
     "three-bvh-csg": "^0.0.17",

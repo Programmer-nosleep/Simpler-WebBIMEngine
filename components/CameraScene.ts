@@ -48,6 +48,24 @@ export async function createCameraScene(
   components.init();
   world.scene.setup();
 
+  // Keep fragments models updating (tiles/LOD) when the camera moves.
+  const fragments = components.get(OBC.FragmentsManager);
+  let fragmentsUpdateInFlight = false;
+  const requestFragmentsUpdate = (force: boolean) => {
+    if (!fragments.initialized) return;
+    if (fragmentsUpdateInFlight) return;
+    fragmentsUpdateInFlight = true;
+    fragments.core
+      .update(force)
+      .catch((error) => console.warn("Fragments update failed:", error))
+      .finally(() => {
+        fragmentsUpdateInFlight = false;
+      });
+  };
+
+  world.camera.controls.addEventListener("control", () => requestFragmentsUpdate(false));
+  world.camera.controls.addEventListener("rest", () => requestFragmentsUpdate(true));
+
   if (config.background === null) {
     world.scene.three.background = null;
   } else {
