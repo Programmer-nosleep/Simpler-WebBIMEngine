@@ -1,5 +1,7 @@
 import * as THREE from "three";
-import type * as OBC from "@thatopen/components";
+import * as OBC from "@thatopen/components";
+import * as FRAGS from "@thatopen/fragments";
+import * as flatbuffers from "flatbuffers";
 
 import { importDwgOrDxf } from "./dwg";
 import { importGlbOrGltf, exportGlb } from "./glb";
@@ -32,6 +34,8 @@ export type ImportOutcome =
       error: Error;
     };
 
+export type ExportFormat = "ifc" | "glb" | "obj" | "frag" | "schema";
+
 class ImportValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -57,6 +61,9 @@ export class FileController {
 
   private importInput: HTMLInputElement | null = null;
   private pendingImportFiles: File[] = [];
+
+  private lastIfcModel: FRAGS.FragmentsModel | null = null;
+  private lastIfcFileBaseName: string | null = null;
 
   constructor(scene: THREE.Scene, components?: OBC.Components) {
     this.scene = scene;
@@ -106,6 +113,7 @@ export class FileController {
       let imported = false;
       let root: THREE.Object3D | null = null;
       let stats: ImportObjectStats | null = null;
+      let ifcItemsWithGeometry: number | null = null;
 
       if (!extension) {
         throw new ImportValidationError(`Nama file tidak punya ekstensi: '${file.name}'`);
@@ -118,10 +126,28 @@ export class FileController {
           model.object.userData.selectable = true;
           model.object.userData.entityType = "ifc";
           model.object.userData.__fragmentsModel = model;
+          this.lastIfcModel = model;
+          this.lastIfcFileBaseName = this.getFileBaseName(file.name);
+
+          this.bindFragmentsModelToActiveCamera(model);
+          ifcItemsWithGeometry = await this.assertIfcHasGeometry(model, file);
+
           root = model.object as unknown as THREE.Object3D;
-          stats = this.getImportObjectStats(root);
-          this.assertHasRenderableGeometry(stats, file);
+          stats = this.getIfcImportStats(model, root);
+
           this.scene.add(model.object);
+
+          // Trigger an initial fragments update so tiles start showing up quickly.
+          // Don't fail the import if this update errors for any reason.
+          try {
+            const fragments = this.components!.get(OBC.FragmentsManager);
+            if (fragments.initialized) {
+              await fragments.core.update(true);
+            }
+          } catch (e) {
+            console.warn("Fragments update failed after IFC import (non-fatal):", e);
+          }
+
           imported = true;
           break;
         }
@@ -169,7 +195,10 @@ export class FileController {
         this.clearPendingImport();
         const finalRoot = root ?? new THREE.Group();
         const finalStats = stats ?? this.getImportObjectStats(finalRoot);
-        const message = `Import berhasil: ${file.name} (mesh: ${finalStats.meshCount}, tris: ${finalStats.triangleCount})`;
+        const message =
+          extension === "ifc" && ifcItemsWithGeometry !== null
+            ? `Import berhasil: ${file.name} (IFC items with geometry: ${ifcItemsWithGeometry})`
+            : `Import berhasil: ${file.name} (mesh: ${finalStats.meshCount}, tris: ${finalStats.triangleCount})`;
         console.info(message);
         return { ok: true, file, extension, root: finalRoot, stats: finalStats, message };
       }
@@ -184,13 +213,13 @@ export class FileController {
     }
   }
 
-  public setupExport(buttonElement: HTMLElement, format: 'ifc' | 'glb' | 'obj') {
+  public setupExport(buttonElement: HTMLElement, format: ExportFormat) {
     buttonElement.addEventListener("click", async () => {
       await this.export(format);
     });
   }
 
-  public async export(format: "ifc" | "glb" | "obj") {
+  public async export(format: ExportFormat) {
     console.log(`Exporting ${format}...`);
     switch (format) {
       case "glb": {
@@ -207,7 +236,65 @@ export class FileController {
         console.warn("IFC export is not supported directly from the scene graph.");
         break;
       }
+      case "frag": {
+        await this.exportLastIfcAsFragments();
+        break;
+      }
+      case "schema": {
+        await this.exportLastIfcSchema();
+        break;
+      }
     }
+  }
+
+  private getFileBaseName(filename: string) {
+    const name = filename.split(/[\\/]/).pop() ?? filename;
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) return name;
+    return name.slice(0, dot);
+  }
+
+  private getLastIfcModel(): FRAGS.FragmentsModel | null {
+    if (this.lastIfcModel) return this.lastIfcModel;
+
+    let found: FRAGS.FragmentsModel | null = null;
+    this.scene.traverse((obj: any) => {
+      if (found) return;
+      const model = obj?.userData?.__fragmentsModel as FRAGS.FragmentsModel | undefined;
+      if (model && typeof (model as any).getBuffer === "function") found = model;
+    });
+    return found;
+  }
+
+  private async exportLastIfcAsFragments() {
+    const model = this.getLastIfcModel();
+    if (!model) {
+      console.warn("Tidak ada model IFC (Fragments) yang bisa diexport. Import IFC dulu.");
+      return;
+    }
+
+    const buffer = await model.getBuffer(true);
+    const name = this.lastIfcFileBaseName ? `${this.lastIfcFileBaseName}.frag` : "model.frag";
+    this.downloadFile(new Blob([buffer]), name);
+  }
+
+  private async exportLastIfcSchema() {
+    const model = this.getLastIfcModel();
+    if (!model) {
+      console.warn("Tidak ada model IFC (Fragments) untuk ekstrak schema. Import IFC dulu.");
+      return;
+    }
+
+    const buffer = await model.getBuffer(true);
+    const bytes = new Uint8Array(buffer);
+    const bb = new flatbuffers.ByteBuffer(bytes);
+    const readModel = FRAGS.Model.getRootAsModel(bb);
+
+    const result: Record<string, any> = {};
+    FRAGS.getObject(readModel, result);
+
+    const name = this.lastIfcFileBaseName ? `${this.lastIfcFileBaseName}.schema.json` : "model.schema.json";
+    this.downloadFile(new Blob([JSON.stringify(result)], { type: "application/json" }), name);
   }
 
   private async ensureIfcReady() {
@@ -223,6 +310,72 @@ export class FileController {
     }
 
     await this.ifcSetupPromise;
+  }
+
+  private getActiveWorldCamera():
+    | THREE.PerspectiveCamera
+    | THREE.OrthographicCamera
+    | null {
+    if (!this.components) return null;
+    const worlds = this.components.get(OBC.Worlds);
+    for (const [, world] of worlds.list) {
+      const camera = (world.camera as any)?.three as
+        | THREE.PerspectiveCamera
+        | THREE.OrthographicCamera
+        | undefined;
+      if (!camera) continue;
+      if ((camera as any).isPerspectiveCamera || (camera as any).isOrthographicCamera) return camera;
+    }
+    return null;
+  }
+
+  private bindFragmentsModelToActiveCamera(model: { useCamera: (camera: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void }) {
+    const camera = this.getActiveWorldCamera();
+    if (!camera) return;
+    try {
+      model.useCamera(camera);
+    } catch (e) {
+      console.warn("Failed to bind FragmentsModel to active camera:", e);
+    }
+  }
+
+  private async assertIfcHasGeometry(model: { getItemsIdsWithGeometry: () => Promise<number[]> }, file: File) {
+    const ids = await model.getItemsIdsWithGeometry();
+    if (ids.length === 0) {
+      throw new ImportValidationError(
+        `File '${file.name}' terbaca, tapi IFC tidak punya item dengan geometry. ` +
+          `Kemungkinan: file hanya berisi metadata, atau schema/representasi IFC tidak didukung.`
+      );
+    }
+    return ids.length;
+  }
+
+  private getIfcImportStats(
+    model: { box: THREE.Box3 },
+    root: THREE.Object3D
+  ): ImportObjectStats {
+    // Fragments models can start with zero rendered meshes (tiles load on-demand),
+    // so rely on the model's bounding box instead of traversing the scene graph.
+    const stats = this.getImportObjectStats(root);
+
+    const box = model.box;
+    const isFiniteBox = (b: THREE.Box3) =>
+      Number.isFinite(b.min.x) &&
+      Number.isFinite(b.min.y) &&
+      Number.isFinite(b.min.z) &&
+      Number.isFinite(b.max.x) &&
+      Number.isFinite(b.max.y) &&
+      Number.isFinite(b.max.z);
+
+    if (!box.isEmpty() && isFiniteBox(box)) {
+      const center = new THREE.Vector3();
+      const size = new THREE.Vector3();
+      box.getCenter(center);
+      box.getSize(size);
+      stats.bounds = { center, size };
+    }
+
+    return stats;
   }
 
   private getImportObjectStats(root: THREE.Object3D): ImportObjectStats {

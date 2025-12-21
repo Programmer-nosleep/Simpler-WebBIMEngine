@@ -17,6 +17,9 @@ importers:
       camera-controls:
         specifier: ^2.10.1
         version: 2.10.1(three@0.182.0)
+      flatbuffers:
+        specifier: ^25.2.10
+        version: 25.2.10
       polygon-clipping:
         specifier: ^0.15.7
         version: 0.15.7

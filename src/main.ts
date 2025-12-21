@@ -19,7 +19,7 @@ import { PolygonTool } from "../components/surface/Polygon";
 import { MoveTool } from "../components/Move";
 import { ExtrudeTool } from "../components/Extrude";
 import { ElevationCameraControls } from "../components/ElevationCameraScene";
-import { FileController } from "../components/tools/fileController";
+import { FileController, type ImportOutcome } from "../components/tools/fileController";
 import { SectionTool } from "../components/SectionPlaneMode";
 import { getCoplanarFaceRegionLocalToRoot, type FaceRegion, type FaceTriangle } from "../utils/faceRegion";
 
@@ -173,6 +173,42 @@ const init = async () => {
 		const fileController = new FileController(cameraScene.scene, cameraScene.components);
 		fileController.setupImport(importer);
 
+		const fitImported = async (outcome: ImportOutcome) => {
+			if (!outcome.ok) return;
+
+			const bounds = outcome.stats.bounds;
+			if (bounds) {
+				const half = bounds.size.clone().multiplyScalar(0.5);
+				const box = new THREE.Box3(
+					bounds.center.clone().sub(half),
+					bounds.center.clone().add(half)
+				);
+
+				const controls = cameraScene.camera.controls;
+				if (controls?.fitToBox) {
+					await controls.fitToBox(box, true, {
+						paddingLeft: 0.15,
+						paddingRight: 0.15,
+						paddingBottom: 0.15,
+						paddingTop: 0.15,
+					});
+				} else {
+					elevationControls.fitScene(outcome.root);
+				}
+
+				const cam = cameraScene.camera.three as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+				const radius = bounds.size.length() * 0.5;
+				cam.near = Math.max(0.01, radius / 1000);
+				cam.far = Math.max(cam.near * 1000, radius * 50, 5000);
+				cam.updateProjectionMatrix();
+			} else {
+				elevationControls.fitScene(outcome.root);
+			}
+
+			const worldRenderer = cameraScene.world.renderer;
+			if (worldRenderer) worldRenderer.needsUpdate = true;
+		};
+
 		const importButton = document.getElementById("importButton") as HTMLButtonElement | null;
 		const updateImportButton = () => {
 			if (!importButton) return;
@@ -185,7 +221,8 @@ const init = async () => {
 
 		if (importButton) {
 			importButton.addEventListener("click", async () => {
-				await fileController.importPending();
+				const outcome = await fileController.importPending();
+				await fitImported(outcome);
 				updateImportButton();
 			});
 		}
@@ -195,7 +232,7 @@ const init = async () => {
 		if (exportButton && exporterFormat) {
 			exportButton.addEventListener("click", () => {
 				const format = exporterFormat.value;
-				if (format === "glb" || format === "obj" || format === "ifc") {
+				if (format === "glb" || format === "obj" || format === "ifc" || format === "frag" || format === "schema") {
 					void fileController.export(format);
 				}
 			});
@@ -239,7 +276,7 @@ const setupGizmo = (container: HTMLElement, cameraScene: any) => {
 };
 
 const setupEnvironment = (cameraScene: any) => {
-	setupGrid(cameraScene, { yOffset: -0.5 });
+	setupGrid(cameraScene, { yOffset: 0.0 });
 	// Non-aktifkan raycasting pada GridHelper agar tidak mengganggu Orbit
 	cameraScene.scene.traverse((child: any) => {
 		if (child.isGridHelper) child.raycast = () => { };
@@ -247,7 +284,7 @@ const setupEnvironment = (cameraScene: any) => {
 
 	// Axes World Setup
 	const axesWorld = new AxesWorld();
-	axesWorld.position.y = -0.5;
+	axesWorld.position.y = 0.0;
 	// Non-aktifkan raycasting pada AxesWorld agar tidak mengganggu Orbit/Line tool
 	axesWorld.traverse((child) => {
 		child.raycast = () => { };
