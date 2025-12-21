@@ -1,12 +1,27 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
-import * as FRAGS from "@thatopen/fragments";
 import * as WEBIFC from "web-ifc";
 
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 
 const workerUrl = "/worker.mjs";
+
+export function markSelectableRoot(object: THREE.Object3D, extraUserData: Record<string, unknown> = {}) {
+    object.userData = {
+        ...object.userData,
+        ...extraUserData,
+        selectable: true,
+    };
+
+    // Prevent child nodes from becoming selectable roots.
+    object.traverse((child) => {
+        if (child === object) return;
+        if ((child.userData as any)?.selectable === true) {
+            delete (child.userData as any).selectable;
+        }
+    });
+}
 
 export class MeshLoader extends OBC.Component implements OBC.Disposable {
     enabled = true;
@@ -79,7 +94,7 @@ export class MeshLoader extends OBC.Component implements OBC.Disposable {
         }
     }
 
-    private async loadIFC(file: File, Options?: { position?: THREE.Vector3 }) {
+    private async loadIFC(file: File, options?: { position?: THREE.Vector3 }) {
         const buffer = await file.arrayBuffer();
         const data = new Uint8Array(buffer);
 
@@ -90,12 +105,12 @@ export class MeshLoader extends OBC.Component implements OBC.Disposable {
         }
 
         const model = await this._ifcLoader.load(data, true, file.name);
-        // Position handling for fragments is distinct, ignoring options.position for now 
-        // as fragments are world-aligned usually.
+        if (options?.position) {
+            model.object.position.copy(options.position);
+        }
 
         // Setup metadata usage
-        model.object.userData.selectable = true;
-        model.object.userData.entityType = "ifc";
+        markSelectableRoot(model.object, { entityType: "ifc" });
 
         const world = this.getWorld();
         if (world) {
@@ -114,23 +129,15 @@ export class MeshLoader extends OBC.Component implements OBC.Disposable {
 
         // Make the imported object selectable as a single unit (root),
         // so MoveTool moves the object instead of "separating" child meshes.
-        object.userData = {
-            ...object.userData,
-            selectable: true,
+        markSelectableRoot(object, {
             entityType: (object.userData as any)?.entityType ?? "imported",
             type: (object.userData as any)?.type ?? defaultType,
-        };
+        });
 
         object.traverse((child) => {
             if ((child as any).isMesh) {
                 child.castShadow = true;
                 child.receiveShadow = true;
-
-                // Child meshes should not become selectable roots; selection/move should
-                // resolve to the imported root object. Keep them pickable via raycast.
-                if (child !== object && (child.userData as any)?.selectable === true) {
-                    delete (child.userData as any).selectable;
-                }
 
                 if (child !== object) {
                     child.userData.type = "imported_mesh";

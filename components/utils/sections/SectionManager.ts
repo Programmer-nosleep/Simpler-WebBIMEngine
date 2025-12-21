@@ -3,10 +3,16 @@ import type { CameraSceneApi } from "../../CameraScene";
 import type { LeftSidebarHandle, SidebarSectionItem } from "../../ui/LeftSidebar";
 import { SectionGizmo } from "./SectionGizmo";
 
+export type SectionMode = "horizontal" | "vertical";
+
 type SectionRecord = {
   id: string;
   label: string;
-  height: number;
+  mode: SectionMode;
+  plane: {
+    normal: THREE.Vector3Tuple;
+    constant: number;
+  };
 };
 
 type SectionManagerOptions = {
@@ -20,7 +26,7 @@ export class SectionManager {
   private sections: SectionRecord[];
   private gizmo: SectionGizmo | null;
   private readonly clippingPlane: THREE.Plane;
-  private previewHeight: number;
+  private previewPlane: THREE.Plane;
   private gizmoVisible: boolean;
   private bounds: THREE.Box3;
   private activeSectionId: string | null;
@@ -36,7 +42,7 @@ export class SectionManager {
     this.sections = [];
     this.gizmo = null;
     this.clippingPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-    this.previewHeight = 0;
+    this.previewPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.gizmoVisible = false;
     this.bounds = new THREE.Box3(
       new THREE.Vector3(-2, 0, -2),
@@ -59,12 +65,13 @@ export class SectionManager {
       this.gizmo.updateBounds(this.bounds);
     }
     this.gizmo.setVisible(this.gizmoVisible);
-    this.setPreviewHeight(this.previewHeight);
+    this.setPreviewPlane(this.previewPlane);
   }
 
-  public setPreviewHeight(height: number) {
-    this.previewHeight = height;
-    this.gizmo?.setHeight(height);
+  public setPreviewPlane(plane: THREE.Plane) {
+    const normalizedPlane = plane.clone().normalize();
+    this.previewPlane.copy(normalizedPlane);
+    this.gizmo?.setPlane(this.previewPlane);
   }
 
   public setGizmoVisible(state: boolean) {
@@ -72,11 +79,20 @@ export class SectionManager {
     this.gizmo?.setVisible(state || this.activeSectionId !== null);
   }
 
-  public createSection(label: string, height: number) {
+  public createSection(label: string, mode: SectionMode, plane: THREE.Plane) {
     const id = crypto.randomUUID();
-    const record: SectionRecord = { id, label, height };
+    const normalizedPlane = plane.clone().normalize();
+    const record: SectionRecord = {
+      id,
+      label,
+      mode,
+      plane: {
+        normal: [normalizedPlane.normal.x, normalizedPlane.normal.y, normalizedPlane.normal.z],
+        constant: normalizedPlane.constant,
+      },
+    };
     this.sections.push(record);
-    this.setPreviewHeight(height);
+    this.setPreviewPlane(normalizedPlane);
     this.updateSidebar();
     this.activateSection(id);
   }
@@ -85,7 +101,7 @@ export class SectionManager {
     const section = this.sections.find((entry) => entry.id === id);
     if (!section) return;
     this.activeSectionId = id;
-    this.applyClipping(section.height);
+    this.applyClipping(new THREE.Plane(new THREE.Vector3(...section.plane.normal), section.plane.constant));
     this.options.onSectionActivated?.();
     this.updateSidebar();
   }
@@ -99,17 +115,32 @@ export class SectionManager {
     this.updateSidebar();
   }
 
-  private applyClipping(height: number) {
-    this.clippingPlane.constant = -height;
+  private applyClipping(plane: THREE.Plane) {
+    this.clippingPlane.copy(plane).normalize();
     this.cameraScene.renderer.clippingPlanes = [this.clippingPlane];
-    this.setPreviewHeight(height);
+    this.setPreviewPlane(this.clippingPlane);
     this.gizmo?.setVisible(true);
+  }
+
+  private formatSectionLabel(section: SectionRecord) {
+    const normal = new THREE.Vector3(...section.plane.normal);
+    const plane = new THREE.Plane(normal, section.plane.constant).normalize();
+
+    if (section.mode === "horizontal") {
+      const height = plane.normal.y !== 0 ? -plane.constant / plane.normal.y : -plane.constant;
+      return `${section.label} (H @ ${height.toFixed(2)}m)`;
+    }
+
+    const center = this.bounds.getCenter(new THREE.Vector3());
+    const distance = plane.distanceToPoint(center);
+    const pointOnPlane = center.clone().sub(plane.normal.clone().multiplyScalar(distance));
+    return `${section.label} (V @ ${pointOnPlane.x.toFixed(2)}, ${pointOnPlane.z.toFixed(2)})`;
   }
 
   private updateSidebar() {
     const items: SidebarSectionItem[] = this.sections.map((section) => ({
       id: section.id,
-      label: `${section.label} (${section.height.toFixed(2)}m)`,
+      label: this.formatSectionLabel(section),
       icon: "grid",
       active: section.id === this.activeSectionId,
       onSelect: () => {

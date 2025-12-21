@@ -7,6 +7,7 @@ import { importDwgOrDxf } from "./dwg";
 import { importGlbOrGltf, exportGlb } from "./glb";
 import { IfcManager } from "./ifc";
 import { importObj, exportObj } from "./obj";
+import { markSelectableRoot } from "../Mesh";
 
 export type ImportObjectStats = {
   meshCount: number;
@@ -123,9 +124,10 @@ export class FileController {
         case "ifc": {
           await this.ensureIfcReady();
           const model = await this.ifc!.loadFile(file, true);
-          model.object.userData.selectable = true;
-          model.object.userData.entityType = "ifc";
-          model.object.userData.__fragmentsModel = model;
+          markSelectableRoot(model.object as unknown as THREE.Object3D, {
+            entityType: "ifc",
+            __fragmentsModel: model,
+          });
           this.lastIfcModel = model;
           this.lastIfcFileBaseName = this.getFileBaseName(file.name);
 
@@ -154,8 +156,7 @@ export class FileController {
         case "glb":
         case "gltf": {
           const object = await importGlbOrGltf(file);
-          object.userData.selectable = true;
-          object.userData.entityType = "model";
+          markSelectableRoot(object, { entityType: "model" });
           root = object;
           stats = this.getImportObjectStats(root);
           this.assertHasRenderableGeometry(stats, file);
@@ -165,8 +166,7 @@ export class FileController {
         }
         case "obj": {
           const object = await importObj(file);
-          object.userData.selectable = true;
-          object.userData.entityType = "model";
+          markSelectableRoot(object, { entityType: "model" });
           root = object;
           stats = this.getImportObjectStats(root);
           this.assertHasRenderableGeometry(stats, file);
@@ -178,8 +178,7 @@ export class FileController {
         case "dxf": {
           const object = await importDwgOrDxf(file);
           if (!object) throw new ImportValidationError("DWG/DXF loader tidak menghasilkan object.");
-          object.userData.selectable = true;
-          object.userData.entityType = "dxf";
+          markSelectableRoot(object, { entityType: "dxf" });
           root = object;
           stats = this.getImportObjectStats(root);
           this.assertHasRenderableGeometry(stats, file);

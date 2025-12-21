@@ -59,11 +59,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     color: dotColor,
     size: dotSize,
     sizeAttenuation: false,
+    depthTest: false,
     depthWrite: false,
   });
   const faceBorderMaterial = new LineMaterial({
     color: borderColor,
     linewidth: borderLineWidth,
+    depthTest: false,
     depthWrite: false,
   });
 
@@ -208,8 +210,15 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   }
 
   function updateBorderResolution() {
-    if (canvas.width <= 0 || canvas.height <= 0) return;
-    faceBorderMaterial.resolution.set(canvas.width, canvas.height);
+    const clientWidth = canvas.clientWidth;
+    const clientHeight = canvas.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    const width = clientWidth > 0 ? Math.round(clientWidth * dpr) : canvas.width;
+    const height = clientHeight > 0 ? Math.round(clientHeight * dpr) : canvas.height;
+
+    if (width <= 0 || height <= 0) return;
+    faceBorderMaterial.resolution.set(width, height);
   }
 
   function createDotsGeometry(width: number, height: number, spacing: number) {
@@ -587,19 +596,35 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   }
 
   function pickFace() {
+    // Raycast against selectable roots (imported roots are usually Groups, not Meshes).
     const candidates: THREE.Object3D[] = [faceObject];
-
     scene.traverse((obj) => {
-      if (obj !== faceObject && obj.userData.selectable && (obj as any).isMesh) {
-        candidates.push(obj);
-      }
+      if (obj === faceObject) return;
+      if ((obj.userData as any)?.selectable === true) candidates.push(obj);
     });
 
-    const intersection = raycaster.intersectObjects(candidates, false)[0];
+    const intersections = raycaster.intersectObjects(candidates, true);
+
+    const isPickableHit = (hit: THREE.Intersection) => {
+      const obj = hit.object as any;
+      if (!obj) return false;
+      if (obj.userData?.isHelper) return false;
+      if (obj.userData?.selectable === false) return false;
+      if (obj.name === "SkyDome" || obj.name === "Grid" || obj.name === "AxesWorld") return false;
+      return true;
+    };
+
+    const intersection = intersections.find((hit) => {
+      if (!isPickableHit(hit)) return false;
+      const materialIndex = hit.face?.materialIndex;
+      const normal = hit.face?.normal;
+      return typeof materialIndex === "number" && !!normal;
+    });
+
     const materialIndex = intersection?.face?.materialIndex;
     const normal = intersection?.face?.normal;
 
-    if (typeof materialIndex !== "number" || !normal) return null;
+    if (!intersection || typeof materialIndex !== "number" || !normal) return null;
     return { object: intersection.object, materialIndex, normal: normal.clone() };
   }
 
@@ -630,7 +655,14 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
     // Highlight Hovered (hanya jika tidak sedang diseleksi)
     if (hoveredObject && hoveredFaceIndex !== null) {
-      const isSelected = currentSelection.some((item) => item.object === hoveredObject);
+      const isSelected = currentSelection.some((item) => {
+        let current: THREE.Object3D | null = hoveredObject;
+        while (current) {
+          if (current === item.object) return true;
+          current = current.parent;
+        }
+        return false;
+      });
       if (!isSelected) {
         setFaceColor(hoveredObject, hoveredFaceIndex, faceHoverColor);
       }
@@ -777,8 +809,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       const isMesh = (obj as any).isMesh === true;
       const mesh = isMesh ? (obj as THREE.Mesh) : null;
 
-      if (mesh && normal) {
-        // Single Face Selection
+      if (normal) {
+        // Single Face Selection (works for meshes and groups: use local AABB face)
         const faceInfo = getFaceInfoFromNormal(normal, bounds);
 
         overlay.group.position

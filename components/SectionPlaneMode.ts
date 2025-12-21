@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { CameraSceneApi } from "./CameraScene";
 import type { LeftSidebarHandle } from "./ui/LeftSidebar";
-import { SectionManager } from "./utils/sections/SectionManager";
+import { SectionManager, type SectionMode } from "./utils/sections/SectionManager";
 
 export class SectionTool {
 	private readonly cameraScene: CameraSceneApi;
@@ -12,7 +12,7 @@ export class SectionTool {
 
 	private enabled = false;
 	private selectableRoots: THREE.Object3D[] = [];
-	private lastPreviewHeight: number | null = null;
+	private lastPreview: { mode: SectionMode; plane: THREE.Plane } | null = null;
 
 	constructor(cameraScene: CameraSceneApi, sidebar: LeftSidebarHandle, container: HTMLElement) {
 		this.cameraScene = cameraScene;
@@ -42,7 +42,7 @@ export class SectionTool {
 
 		this.container.removeEventListener("pointermove", this.onPointerMove);
 		this.container.removeEventListener("pointerdown", this.onPointerDown, { capture: true });
-		this.lastPreviewHeight = null;
+		this.lastPreview = null;
 	}
 
 	refreshBounds() {
@@ -86,20 +86,79 @@ export class SectionTool {
 		const hit = hits.find((h) => this.isValidHit(h));
 
 		if (!hit) {
-			this.lastPreviewHeight = null;
+			this.lastPreview = null;
 			return;
 		}
 
-		this.lastPreviewHeight = hit.point.y;
-		this.sectionManager.setPreviewHeight(this.lastPreviewHeight);
+		const worldNormal = this.getWorldNormal(hit);
+		const mode = this.getSectionMode(worldNormal);
+		const plane = this.getSectionPlane(mode, hit.point, worldNormal);
+		this.lastPreview = { mode, plane };
+		this.sectionManager.setPreviewPlane(plane);
 	};
 
 	private onPointerDown = (event: PointerEvent) => {
 		if (!this.enabled) return;
 		if (event.button !== 0) return;
-		if (this.lastPreviewHeight == null) return;
+		if (!this.lastPreview) return;
 
 		const index = this.sectionManager.getSectionCount() + 1;
-		this.sectionManager.createSection(`Plan ${index}`, this.lastPreviewHeight);
+		const label = this.lastPreview.mode === "horizontal" ? `Plan ${index}` : `Section ${index}`;
+		this.sectionManager.createSection(label, this.lastPreview.mode, this.lastPreview.plane);
 	};
+
+	private getWorldNormal(hit: THREE.Intersection) {
+		const face = hit.face;
+		if (!face) return null;
+		return face.normal
+			.clone()
+			.transformDirection(hit.object.matrixWorld)
+			.normalize();
+	}
+
+	private getSectionMode(worldNormal: THREE.Vector3 | null): SectionMode {
+		if (!worldNormal) return "horizontal";
+		return Math.abs(worldNormal.y) > 0.65 ? "horizontal" : "vertical";
+	}
+
+	private getSectionPlane(
+		mode: SectionMode,
+		point: THREE.Vector3,
+		worldNormal: THREE.Vector3 | null
+	) {
+		if (mode === "horizontal") {
+			const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -point.y);
+			this.orientPlaneToClipTowardsCamera(plane);
+			return plane;
+		}
+
+		const horizontalNormal = worldNormal
+			? new THREE.Vector3(worldNormal.x, 0, worldNormal.z)
+			: new THREE.Vector3(1, 0, 0);
+
+		if (horizontalNormal.lengthSq() < 1e-6) {
+			const cameraDir = new THREE.Vector3();
+			this.cameraScene.camera.three.getWorldDirection(cameraDir);
+			horizontalNormal.set(cameraDir.x, 0, cameraDir.z);
+		}
+
+		if (horizontalNormal.lengthSq() < 1e-6) {
+			horizontalNormal.set(1, 0, 0);
+		}
+
+		horizontalNormal.normalize();
+		const plane = new THREE.Plane(horizontalNormal, -point.dot(horizontalNormal));
+		this.orientPlaneToClipTowardsCamera(plane);
+		return plane;
+	}
+
+	private orientPlaneToClipTowardsCamera(plane: THREE.Plane) {
+		plane.normalize();
+		const cameraPos = new THREE.Vector3();
+		this.cameraScene.camera.three.getWorldPosition(cameraPos);
+		if (plane.distanceToPoint(cameraPos) > 0) {
+			plane.normal.negate();
+			plane.constant *= -1;
+		}
+	}
 }
