@@ -448,9 +448,9 @@ function rowsFromCSV(webix: any, text: string): RowData[] {
       return idx != null && idx < row.length ? row[idx] : "";
     };
 
-    const qty = safeNumber(get("qty", 4));
-    const unit = safeNumber(get("unit_price", 5));
-    // const total = safeNumber(get("total", 6)) || qty * unit; // total unused now
+    // const qty = safeNumber(get("qty", 4));
+    // const unit = safeNumber(get("unit_price", 5));
+    // // const total = safeNumber(get("total", 6)) || qty * unit; // total unused now
 
     out.push({
       label: String(get("label", 0)).trim(),
