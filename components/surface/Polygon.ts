@@ -1,5 +1,37 @@
 import * as THREE from "three";
-import { ensureClosedRing } from "../../helpers/polygon-clipper";
+import { ensureClosedRing, splitFloorsWithNewRect } from "../../helpers/polygon-clipper";
+
+const SURFACE_OFFSET = 0.001;
+// const OUTLINE_OFFSET = 0.0005; // Removed in favor of polygonOffset
+
+function makeSurfaceMaterial(color: number) {
+	return new THREE.MeshStandardMaterial({
+		color,
+		transparent: false,
+		opacity: 1.0,
+		side: THREE.DoubleSide,
+	});
+}
+
+function makeOutlineMaterial(color = 0x000000) {
+	return new THREE.LineBasicMaterial({
+		color,
+		depthTest: true,
+		depthWrite: false,
+		polygonOffset: true,
+		polygonOffsetFactor: -10.0,
+		polygonOffsetUnits: -10.0,
+	});
+}
+
+function makePolygonOutlineGeometry(sides: number) {
+	const pts: THREE.Vector3[] = [];
+	for (let i = 0; i < sides; i++) {
+		const t = (i / sides) * Math.PI * 2;
+		pts.push(new THREE.Vector3(Math.cos(t), 0, Math.sin(t)));
+	}
+	return new THREE.BufferGeometry().setFromPoints(pts);
+}
 
 export class PolygonTool {
 	private scene: THREE.Scene;
@@ -10,6 +42,7 @@ export class PolygonTool {
 	private isDrawing = false;
 	private anchor: THREE.Vector3 | null = null;
 	private previewMesh: THREE.Mesh | null = null;
+	private previewEdge: THREE.LineLoop | null = null;
 	private dimOverlay: HTMLInputElement | null = null;
 
 	private sides = 6;
@@ -17,6 +50,7 @@ export class PolygonTool {
 	private mouse = new THREE.Vector2();
 	private raycaster = new THREE.Raycaster();
 	private planeXZ = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+	private tempVec3 = new THREE.Vector3();
 
 	constructor(
 		scene: THREE.Scene,
@@ -113,9 +147,18 @@ export class PolygonTool {
 
 		this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
+		const groundY = this.getGroundY();
+		this.planeXZ.constant = -(groundY + SURFACE_OFFSET);
+
 		const hit = new THREE.Vector3();
 		if (this.raycaster.ray.intersectPlane(this.planeXZ, hit)) return hit;
 		return null;
+	}
+
+	private getGroundY() {
+		const groundRef =
+			this.scene.getObjectByName("Grid") ?? this.scene.getObjectByName("AxesWorld");
+		return groundRef ? groundRef.getWorldPosition(this.tempVec3).y : 0;
 	}
 
 	private updatePreview(center: THREE.Vector3, radius: number) {
@@ -129,26 +172,40 @@ export class PolygonTool {
 				this.previewMesh.geometry.dispose();
 				(this.previewMesh.material as THREE.Material).dispose();
 				this.previewMesh = null;
+
+				if (this.previewEdge) {
+					this.previewEdge.removeFromParent();
+					this.previewEdge.geometry.dispose();
+					(this.previewEdge.material as THREE.Material).dispose();
+					this.previewEdge = null;
+				}
 			}
 		}
 
 		if (!this.previewMesh) {
 			const geometry = new THREE.CircleGeometry(1, this.sides);
 			geometry.rotateX(-Math.PI / 2);
-			const material = new THREE.MeshBasicMaterial({
-				color: 0x99ccff,
-				// transparent: true,
-				opacity: 1.0,
-				side: THREE.DoubleSide,
-			});
-			this.previewMesh = new THREE.Mesh(geometry, material);
+			this.previewMesh = new THREE.Mesh(geometry, makeSurfaceMaterial(0x99ccff));
 			this.previewMesh.userData.isHelper = true;
 			this.previewMesh.userData.selectable = false;
 			this.scene.add(this.previewMesh);
 		}
 
-		this.previewMesh.position.set(center.x, -0.5, center.z);
+		this.previewMesh.position.set(center.x, center.y, center.z);
 		this.previewMesh.scale.set(radius, 1, radius);
+
+		if (!this.previewEdge) {
+			const geom = makePolygonOutlineGeometry(this.sides);
+			const line = new THREE.LineLoop(geom, makeOutlineMaterial());
+			line.userData.isHelper = true;
+			line.userData.selectable = false;
+			line.renderOrder = 1001;
+			this.previewEdge = line;
+			this.scene.add(line);
+		}
+
+		this.previewEdge.position.set(center.x, center.y, center.z);
+		this.previewEdge.scale.set(radius, 1, radius);
 	}
 
 	private finalize() {
@@ -169,16 +226,20 @@ export class PolygonTool {
 		const geom = new THREE.ShapeGeometry(shape);
 		geom.rotateX(-Math.PI / 2);
 
-		const mat = new THREE.MeshStandardMaterial({
-			color: 0xcccccc,
-			transparent: true,
-			opacity: 0.5,
-			side: THREE.DoubleSide,
-		});
-		const mesh = new THREE.Mesh(geom, mat);
+		const mesh = new THREE.Mesh(geom, makeSurfaceMaterial(0xcccccc));
 		mesh.position.copy(center);
 
 		const ring = ensureClosedRing(pts.map((p) => [center.x + p.x, center.z + p.y] as [number, number]));
+
+		const outline = new THREE.LineLoop(
+			makePolygonOutlineGeometry(sides),
+			makeOutlineMaterial()
+		);
+		outline.userData.selectable = false;
+		outline.renderOrder = 1001;
+		// outline.position.y = OUTLINE_OFFSET; // Removed
+		outline.scale.set(radius, 1, radius);
+		mesh.add(outline);
 
 		mesh.userData = {
 			...(mesh.userData || {}),
@@ -199,7 +260,7 @@ export class PolygonTool {
 			},
 		};
 
-		this.scene.add(mesh);
+		splitFloorsWithNewRect(this.scene, mesh, { depth: 0 });
 		this.cleanup();
 	}
 
@@ -217,6 +278,13 @@ export class PolygonTool {
 			this.previewMesh.geometry.dispose();
 			(this.previewMesh.material as THREE.Material).dispose();
 			this.previewMesh = null;
+		}
+
+		if (this.previewEdge) {
+			this.previewEdge.removeFromParent();
+			this.previewEdge.geometry.dispose();
+			(this.previewEdge.material as THREE.Material).dispose();
+			this.previewEdge = null;
 		}
 
 		if (this.dimOverlay) {

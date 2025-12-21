@@ -8,7 +8,8 @@ import { type CameraProjectionMode, createCameraScene } from "../components/Came
 import { setupGrid } from "../components/Grid";
 import { AxesWorld } from "../utils/axesWorld";
 import { setupLeftSidebar } from "../components/ui/LeftSidebar";
-import { setupRightSidebar } from "../components/ui/RightSidebar";
+import { setupRightSidebar, type RightSidebarHandle } from "../components/ui/RightSidebar";
+import { setupLayoutModel } from "../components/ui/LayoutModel";
 import { setupDock, type DockToolId } from "../components/ui/Dock";
 import { setupNavigationInputBindings } from "../helpers/navigationInputs";
 import { createSelectionMarquee, type SelectionRect } from "../components/tools/SelectionMarquee";
@@ -22,6 +23,8 @@ import { ElevationCameraControls } from "../components/ElevationCameraScene";
 import { FileController, type ImportOutcome } from "../components/tools/fileController";
 import { SectionTool } from "../components/SectionPlaneMode";
 import { getCoplanarFaceRegionLocalToRoot, type FaceRegion, type FaceTriangle } from "../utils/faceRegion";
+import { GroupManager } from "../components/Group";
+import { SnapTool } from "../components/tools/SnapTool";
 
 type NavigationModeOption = "Orbit" | "Plan";
 
@@ -30,18 +33,25 @@ const isProjectionMode = (value: string): value is CameraProjectionMode =>
 const isNavigationMode = (value: string): value is NavigationModeOption =>
 	value === "Orbit" || value === "Plan";
 
+
 const init = async () => {
 	let elevationControls: ElevationCameraControls;
+
+	// Instantiate SnapTool
+	const snapTool = new SnapTool();
 
 	const leftSidebar = setupLeftSidebar(undefined, {
 		onDefault: () => elevationControls?.setPerspective(),
 		onElevation: (dir) => elevationControls?.setElevationView(dir),
-	});
-	setupRightSidebar(document.getElementById("rightSidebar")!, {
 		onUnitChange: (u) => console.log("unit", u),
 		onToleranceChange: (v) => console.log("tolerance", v),
-		onParallelSnapChange: (v) => console.log("parallel", v),
+		onParallelSnapChange: (v) => snapTool.setParallelSnap(v),
+		onPerpendicularSnapChange: (v) => snapTool.setPerpendicularSnap(v),
 	});
+
+	// Setup RightSidebar (Message UI)
+	const rightSidebar = setupRightSidebar();
+
 	const container = document.getElementById("threejs");
 	if (!container) throw new Error("Container element #threejs tidak ditemukan");
 
@@ -65,7 +75,7 @@ const init = async () => {
 	setupGizmo(container, cameraScene);
 
 	// 3. Setup Environment (Grid, SkyDome)
-	setupEnvironment(cameraScene);
+	const { skyHelper } = setupEnvironment(cameraScene);
 
 	// 4. Setup Test Objects (Cube)
 	const testObjectData = createTestCube(cameraScene.scene);
@@ -89,8 +99,11 @@ const init = async () => {
 		borderLineWidth: 2,
 	});
 
-	// 6. Setup Selection System
-	const selectionSystem = setupSelectionSystem(container, cameraScene, faceSelection);
+	// 6. Setup Group Manager
+	const groupManager = new GroupManager(cameraScene.scene);
+
+	// 7. Setup Selection System
+	const selectionSystem = setupSelectionSystem(container, cameraScene, faceSelection, groupManager);
 
 	// 7. Setup Tools (Line, Snap)
 	const getCamera = () => cameraScene.camera.three;
@@ -135,10 +148,78 @@ const init = async () => {
 		container
 	);
 
+	// Timeline Color Sync Logic
+	skyHelper.onTimeChange = (hour: number) => {
+		// Night: < 6.0 or > 18.5
+		// Day: >= 6.5 and <= 18.0
+		// Transition: 6.0-6.5 (Night->Day) and 18.0-18.5 (Day->Night)
+
+		// Calculate "Night Factor": 0=Day (Black lines), 1=Night (White lines)
+		let nightFactor = 0;
+
+		if (hour < 6.0 || hour >= 18.5) {
+			nightFactor = 1;
+		} else if (hour >= 6.5 && hour <= 18.0) {
+			nightFactor = 0;
+		} else if (hour >= 6.0 && hour < 6.5) {
+			// Morning Fade: 6.0 (Night/White) -> 6.5 (Day/Black)
+			// alpha 0 -> 1 means Night -> Day
+			const alpha = (hour - 6.0) / 0.5;
+			nightFactor = 1 - alpha;
+		} else if (hour >= 18.0 && hour < 18.5) {
+			// Evening Fade: 18.0 (Day/Black) -> 18.5 (Night/White)
+			const alpha = (hour - 18.0) / 0.5;
+			nightFactor = alpha;
+		}
+
+		const dayColor = new THREE.Color(0x000000);
+		const nightColor = new THREE.Color(0xffffff);
+		const targetColor = dayColor.clone().lerp(nightColor, nightFactor);
+
+		// Update Lines in the scene
+		cameraScene.scene.traverse((obj: THREE.Object3D) => {
+			// 1. Face Outlines (created by LineTool/FaceSelection)
+			const isOutline = (obj.userData as any)?.isFaceOutline === true;
+
+			// 2. User Drawn Lines (LineTool)
+			// Check if it's a Line/LineSegments, manually selectable, and NOT a helper/grid
+			const isUserLine = (obj as any).isLine &&
+				(obj.userData as any)?.selectable === true &&
+				!(obj.userData as any)?.isHelper;
+
+			if (isOutline || isUserLine) {
+				const mesh = obj as THREE.Line | THREE.LineSegments;
+				if (mesh.material) {
+					// Handle single material or array
+					const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+					mats.forEach(m => {
+						if ((m as THREE.LineBasicMaterial).color) {
+							(m as THREE.LineBasicMaterial).color.copy(targetColor);
+							m.needsUpdate = true;
+						}
+					});
+				}
+			}
+		});
+
+		// Request render update
+		const worldRenderer = cameraScene.world.renderer;
+		if (worldRenderer) worldRenderer.needsUpdate = true;
+
+		// Update LineTool Preview Color
+		lineTool.setPreviewColor(targetColor);
+	};
+
+	// Trigger initial update (default time 6:00)
+	skyHelper.updateTime(6);
+
 	// 8. Setup UI Bindings
 	setupUIBindings(cameraScene);
 
 	// 9. Setup Dock & Tool State Management
+	// Layout Model Setup
+	await setupLayoutModel(cameraScene);
+
 	const dock = await setupDockSystem(
 		cameraScene,
 		lineTool,
@@ -149,7 +230,8 @@ const init = async () => {
 		extrudeTool,
 		selectionSystem,
 		faceSelection,
-		sectionTool
+		sectionTool,
+		rightSidebar
 	);
 
 	leftSidebar.onSectionAdd(() => dock.setActiveTool("section"));
@@ -240,6 +322,8 @@ const init = async () => {
 	} catch (error) {
 		console.warn("File importer gagal diinisialisasi:", error);
 	}
+
+
 };
 
 // --- Helper Functions ---
@@ -250,8 +334,9 @@ const setupGizmo = (container: HTMLElement, cameraScene: any) => {
 	gizmoCanvas.setAttribute("aria-label", "camera axes gizmo");
 	// Pastikan gizmo tidak menutupi seluruh layar (blocking events)
 	gizmoCanvas.style.position = "absolute";
-	gizmoCanvas.style.top = "10px";
-	gizmoCanvas.style.right = "10px";
+	gizmoCanvas.style.top = "70px";
+	gizmoCanvas.style.right = "78px";
+	gizmoCanvas.style.left = "auto";
 	gizmoCanvas.style.zIndex = "100";
 	container.appendChild(gizmoCanvas);
 
@@ -293,7 +378,9 @@ const setupEnvironment = (cameraScene: any) => {
 
 	// SkyDome Setup
 	const skyHelper = new SkyDomeHelper(cameraScene.scene);
+
 	new SkyDomeUI(skyHelper);
+	return { skyHelper };
 };
 
 const createTestCube = (scene: THREE.Scene) => {
@@ -321,11 +408,12 @@ const createTestCube = (scene: THREE.Scene) => {
 const setupSelectionSystem = (
 	container: HTMLElement,
 	cameraScene: any,
-	faceSelection: any
+	faceSelection: any,
+	groupManager: GroupManager
 ) => {
 	const scene = cameraScene.scene;
 	const selectedObjects = new Set<THREE.Object3D>();
-	const selectionColor = new THREE.Color(0x4f8cff);
+	// const selectionColor = new THREE.Color(0x4f8cff);
 	let primarySelectedObject: THREE.Object3D | null = null;
 	let primarySelectedNormal: THREE.Vector3 | null = null;
 	let primarySelectedRegion: FaceRegion | null = null;
@@ -403,16 +491,19 @@ const setupSelectionSystem = (
 				const mat = material as THREE.Material & { color?: THREE.Color };
 				if (!mat || !(mat as any).color) return;
 				const meshMaterial = mat as THREE.MeshBasicMaterial;
+				void meshMaterial;
 
-				if (selected) {
-					if (meshMaterial.userData.__originalColor === undefined) {
-						meshMaterial.userData.__originalColor = meshMaterial.color.getHex();
-					}
-					meshMaterial.color.copy(selectionColor);
-				} else if (meshMaterial.userData.__originalColor !== undefined) {
-					meshMaterial.color.setHex(meshMaterial.userData.__originalColor);
-					delete meshMaterial.userData.__originalColor;
-				}
+				// Selection highlight disabled as per user request
+				// if (selected) {
+				// 	if (meshMaterial.userData.__originalColor === undefined) {
+				// 		meshMaterial.userData.__originalColor = meshMaterial.color.getHex();
+				// 	}
+				// 	meshMaterial.color.copy(selectionColor);
+				// } else if (meshMaterial.userData.__originalColor !== undefined) {
+				// 	meshMaterial.color.setHex(meshMaterial.userData.__originalColor);
+				// 	delete meshMaterial.userData.__originalColor;
+				// }
+				void selected; // Silence unused variable warning
 			});
 		});
 	};
@@ -475,7 +566,21 @@ const setupSelectionSystem = (
 
 	const selectionMarquee = createSelectionMarquee(container, {
 		onSelection: (rect, event) => {
-			updateSelections(rect, { additive: event.shiftKey });
+			if (selectionSystem.currentTool === "group") {
+				const objectsInRect = selectObjectsInRect(rect);
+				if (objectsInRect.length > 0) {
+					const group = groupManager.createGroupFromObjects(objectsInRect);
+					if (group) {
+						// Select the new group
+						clearSelection();
+						setObjectSelection(group, true);
+						selectedObjects.add(group);
+						syncFaceSelection();
+					}
+				}
+			} else {
+				updateSelections(rect, { additive: event.shiftKey });
+			}
 		},
 	});
 
@@ -611,6 +716,9 @@ const setupSelectionSystem = (
 		selectionMarquee,
 		syncFaceSelection,
 		currentTool: "select" as DockToolId,
+		setSelectionHighlightEnabled: (enabled: boolean) => {
+			selectedObjects.forEach((obj) => setObjectSelection(obj, enabled));
+		},
 		clearSelection,
 		selectSingle: (object: THREE.Object3D, normal?: THREE.Vector3, region?: FaceRegion) =>
 			selectSingleObject(object, normal, region),
@@ -646,7 +754,7 @@ const setupSelectionSystem = (
 						} catch { }
 					}
 				});
-				material.dispose();	
+				material.dispose();
 			};
 
 			const disposeObject3D = (object: THREE.Object3D) => {
@@ -713,6 +821,18 @@ const setupUIBindings = (cameraScene: any) => {
 			if (!isNavigationMode(navigationSelect.value)) return;
 			cameraScene.setNavigationMode(navigationSelect.value);
 		});
+
+		const navigationToggle = document.getElementById("navigationToggle") as HTMLButtonElement | null;
+		if (navigationToggle) {
+			navigationToggle.addEventListener("click", () => {
+				const current = navigationSelect.value;
+				const next = current === "Orbit" ? "Plan" : "Orbit";
+				if (isNavigationMode(next)) {
+					cameraScene.setNavigationMode(next);
+				}
+			});
+		}
+
 		cameraScene.onNavigationModeChanged((mode: string) => updateNavigationSelect(mode));
 	}
 };
@@ -727,10 +847,18 @@ const setupDockSystem = async (
 	extrudeTool: ExtrudeTool,
 	selectionSystem: any,
 	faceSelection: any,
-	sectionTool: SectionTool
+
+	sectionTool: SectionTool,
+	rightSidebar: RightSidebarHandle
 ) => {
-	const updateSelectionState = (tool: DockToolId) => {
-		selectionSystem.currentTool = tool;
+	const updateSelectionState = (tool: DockToolId | null) => {
+		selectionSystem.currentTool = tool ?? "select"; // Default to select or just null? If null, maybe "select" behavior logic needs checking.
+		// If tool is null, we might want to just disable everything or fallback to select.
+		// For now, let's treat null as "no tool active" or fallback to select if critical.
+		// However, if we toggle chat off, we typically want to return to "select" or stay idle.
+		// If the user untoggles chat, maybe we should auto-select "select"?
+
+		selectionSystem.setSelectionHighlightEnabled?.(tool !== "extrude");
 
 		// Reset all tools first
 		lineTool.disable();
@@ -740,10 +868,29 @@ const setupDockSystem = async (
 		moveTool.disable();
 		extrudeTool.disable();
 		sectionTool.disable();
+		sectionTool.disable();
 		selectionSystem.selectionMarquee.disable();
 		faceSelection.setSelectionByNormal(null);
 
-		if (tool === "select") {
+		if (tool === null) {
+			// If no tool, maybe fallback to select? 
+			// But Dock.ts setActive(null) doesn't highlight any button.
+			// Users usually expect 'select' to be default. 
+			// Let's just do nothing (idle) or enable select without button highlight?
+			// Ideally, if chat toggles off, we just hide chat. What about the previous tool?
+			// The dock doesn't remember previous tool.
+			// Let's enable select as fallback for interaction but without dock highlight if that's what 'null' implies.
+			// Actually, if tool is null, we can just return.
+			// But interacting with canvas without 'select' might be weird if we need to select things.
+			// Let's default to enabling selection marquee/logic if null?
+			// Or just:
+			selectionSystem.currentTool = "select";
+			selectionSystem.selectionMarquee.enable();
+			selectionSystem.syncFaceSelection();
+			return;
+		}
+
+		if (tool === "select" || tool === "group") {
 			selectionSystem.selectionMarquee.enable();
 			selectionSystem.syncFaceSelection();
 		} else if (tool === "line") {
@@ -758,7 +905,6 @@ const setupDockSystem = async (
 			moveTool.enable();
 		} else if (tool === "extrude") {
 			extrudeTool.enable();
-			selectionSystem.syncFaceSelection();
 		} else if (tool === "section") {
 			sectionTool.enable();
 		}
@@ -767,6 +913,9 @@ const setupDockSystem = async (
 	const dock = await setupDock({
 		initialTool: "select",
 		onToolChange: (tool) => {
+			// Toggle Chat Sidebar
+			rightSidebar.toggle(tool === "chat");
+
 			updateSelectionState(tool);
 
 			const controls = cameraScene.camera.controls;
@@ -800,6 +949,12 @@ const setupDockSystem = async (
 					controls.mouseButtons.right = THREE.MOUSE.PAN;
 				}
 			} else if (tool === "section") {
+				cameraScene.setNavigationMode("Orbit");
+				if (controls) {
+					controls.mouseButtons.left = THREE.MOUSE.ROTATE;
+					controls.mouseButtons.right = THREE.MOUSE.PAN;
+				}
+			} else if (tool === "group") {
 				cameraScene.setNavigationMode("Orbit");
 				if (controls) {
 					controls.mouseButtons.left = THREE.MOUSE.ROTATE;

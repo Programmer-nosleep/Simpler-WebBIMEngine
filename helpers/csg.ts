@@ -106,8 +106,8 @@ export function getHollowExtrusionMeta(
   if (!Number.isFinite(depth) || Math.abs(depth) <= 1e-4) return null;
   if (depth < 0) return null;
 
-  const wallThicknessRaw = Number(ud.extrudeWallThickness ?? defaults.wallThickness ?? 0.15);
-  const wallThickness = Number.isFinite(wallThicknessRaw) ? wallThicknessRaw : cached?.wallThickness ?? 0.15;
+  const wallThicknessRaw = Number(ud.extrudeWallThickness ?? defaults.wallThickness ?? 0);
+  const wallThickness = Number.isFinite(wallThicknessRaw) ? wallThicknessRaw : cached?.wallThickness ?? 0;
 
   const floorThicknessRaw = Number(ud.extrudeFloorThickness ?? defaults.floorThickness ?? 0.1);
   const floorThickness = Number.isFinite(floorThicknessRaw) ? floorThicknessRaw : cached?.floorThickness ?? 0.1;
@@ -144,7 +144,7 @@ function buildHollowExtrusionSolids(
   options: HollowExtrusionOptions = {}
 ) {
   const safeDepth = Math.max(DEFAULT_MIN_DEPTH, Math.abs(depth));
-  const wallThickness = Math.max(DEFAULT_MIN_DEPTH, options.wallThickness ?? 0.15);
+  const wallThickness = Math.max(DEFAULT_MIN_DEPTH, options.wallThickness ?? 0);
   const extraCut = Math.max(0, options.extraCut ?? 0.1);
 
   const requestedFloor = options.floorThickness ?? 0.1;
@@ -178,7 +178,7 @@ function buildHollowExtrusionSolids(
     if (!Number.isFinite(span) || span <= DEFAULT_MIN_DEPTH) return 0.85;
     const remaining = span - wallThickness * 2;
     if (remaining <= DEFAULT_MIN_DEPTH) return 0.85;
-    return THREE.MathUtils.clamp(remaining / span, 0.05, 0.98);
+    return THREE.MathUtils.clamp(remaining / span, 0.05, 0.9999);
   };
 
   const scaleX = safeScale(outerInfo.size.x);
@@ -420,7 +420,7 @@ export function buildExtrusionGeometry(
   const depth = Math.max(minDepth, depthAbs);
 
   let geometry: THREE.BufferGeometry;
-  if (options.hollow && depthSigned >= 0) {
+  if (options.hollow) {
     geometry = buildHollowExtrusionGeometry(shape, depth, options);
   } else {
     geometry = new THREE.ExtrudeGeometry(shape, {

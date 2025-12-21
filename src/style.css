@@ -27,7 +27,8 @@ body,
 }
 
 body {
-  overflow: hidden; /* ✅ canvas aman, sidebar tetap bisa scroll */
+  overflow: hidden;
+  /* ✅ canvas aman, sidebar tetap bisa scroll */
 }
 
 #threejs {
@@ -74,6 +75,69 @@ body {
 
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(20px);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-x: hidden;
+  /* Hide content during transition */
+}
+
+#leftSidebar.collapsed {
+  width: 58px;
+  overflow-y: hidden;
+  /* Hide scrollbar when collapsed */
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* Aggressively hide all content labels, inputs, and lists when collapsed */
+#leftSidebar.collapsed .sidebar-item-label,
+#leftSidebar.collapsed .sidebar-section-title,
+#leftSidebar.collapsed .sidebar-section-subtitle,
+#leftSidebar.collapsed .sidebar-add,
+#leftSidebar.collapsed .sidebar-form,
+/* Just in case */
+#leftSidebar.collapsed .sidebar-items,
+/* Hides all lists and form rows */
+#leftSidebar.collapsed .sidebar-field,
+#leftSidebar.collapsed .sidebar-viewport-row>div:first-child
+
+/* Viewport Content Wrapper */
+  {
+  display: none !important;
+  opacity: 0;
+}
+
+/* Fix viewport/header layout when collapsed */
+#leftSidebar.collapsed .sidebar-viewport-row {
+  padding: 12px 0;
+  justify-content: center;
+  border: none;
+  background: transparent;
+}
+
+/* Center icons */
+#leftSidebar.collapsed .sidebar-item-button {
+  justify-content: center;
+  padding: 4px;
+}
+
+/* Rotate Toggle Button */
+/* .sidebar-toggle-btn {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#leftSidebar.collapsed .sidebar-toggle-btn {
+  transform: rotate(180deg);
+} */
+
+#leftSidebar.collapsed .sidebar-section-toggle {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+/* Keep chevron visible in headers as the only indicator */
+#leftSidebar.collapsed .icon-chevron {
+  display: block;
+  margin: 0 auto;
 }
 
 #leftSidebar::-webkit-scrollbar {
@@ -210,11 +274,13 @@ body {
    ========================= */
 #rightSidebar {
   position: fixed;
-  top: 150px;
-  right: 12px;
+  top: 70px;
+  right: 78px;
+  /* Shift left to avoid dock intersection */
   margin-top: 0;
 
-  width: min(360px, calc(100vw - 24px));
+  width: min(360px, calc(100vw - 120px));
+  height: 100%;
   padding: 18px 18px 20px;
 
   background: rgba(0, 0, 0, 0.85);
@@ -228,7 +294,7 @@ body {
   gap: 18px;
 
   overflow-y: auto;
-  max-height: calc(100vh - 140px);
+  max-height: calc(100vh - 124px);
 
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(20px);
@@ -318,18 +384,27 @@ body {
 
 .sidebar-input {
   font-size: 12px;
-  padding: 6px 28px 6px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(20, 20, 20, 0.85);
+  padding: 6px 24px 6px 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
   color: inherit;
   outline: none;
-  min-width: 160px;
+  min-width: 80px;
+  text-align: right;
+  border-bottom: 1px solid transparent;
+  /* Reserve space for focus */
+  transition: border-color 0.2s ease;
 }
 
 .sidebar-input:focus {
-  border-color: rgba(79, 140, 255, 0.7);
-  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.18);
+  border-bottom-color: rgba(79, 140, 255, 0.7);
+  box-shadow: none;
+}
+
+.sidebar-input option {
+  background-color: #222;
+  color: #fff;
 }
 
 .sidebar-number {
@@ -406,7 +481,8 @@ body {
 #ui-panels {
   display: inline-flex;
   flex-direction: row;
-  flex-wrap: nowrap; /* ganti jadi wrap kalau mau turun saat sempit */
+  flex-wrap: nowrap;
+  /* ganti jadi wrap kalau mau turun saat sempit */
   gap: 8px;
   align-items: center;
   justify-content: flex-start;
@@ -524,7 +600,7 @@ body {
   display: inline-flex;
   align-items: center;
   height: 24px;
-  min-width: 52px;
+  min-width: 38px;
   justify-content: flex-end;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -586,56 +662,106 @@ body {
 }
 
 /* =========================
-   DOCK
+   DOCK (TOOLS) + CHAT (BOX TERPISAH)
    ========================= */
-#dock {
+
+/* wrapper untuk dock tools (KANAN ATAS) */
+#dock-wrapper {
   position: fixed;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
-  display: inline-flex;
-  gap: 10px;
-  background: rgba(20, 24, 32, 0.9);
-  padding: 10px 18px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(20px);
-  align-items: center;
+  right: 16px;
+  top: 12px;
   z-index: 15;
 }
 
-#dock .dock-button {
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  border: none;
+/* dock tools: JANGAN fixed lagi (biar wrapper yang ngatur posisi) */
+#dock {
+  position: relative;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  transform: none;
+
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  background: rgba(30, 30, 30, 0.95);
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  width: auto;
+}
+
+/* wrapper khusus chat: FIXED di KANAN BAWAH (kotak terpisah) */
+#dock-message-wrapper {
+  position: fixed;
+  right: 16px;
+  /* samain dengan #dock-wrapper biar sejajar */
+  bottom: 16px;
+  z-index: 15;
+}
+
+/* dock chat box */
+#dock-message {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  background: rgba(30, 30, 30, 0.95);
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  width: auto;
+}
+
+/* shared button style */
+#dock .dock-button,
+#dock-message .dock-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid transparent;
   background: transparent;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   cursor: pointer;
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition: all 0.2s ease;
 }
 
-#dock .dock-button svg {
-  width: 22px;
-  height: 22px;
+#dock .dock-button svg,
+#dock-message .dock-button svg {
+  width: 20px;
+  height: 20px;
   fill: none;
-  stroke: white;
+  stroke: rgba(255, 255, 255, 0.7);
 }
 
 #dock .dock-button:hover,
-#dock .dock-button:focus-visible {
-  background: rgba(255, 255, 255, 0.12);
+#dock-message .dock-button:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 
-#dock .dock-button.active {
-  background: linear-gradient(145deg, #ff8b2f, #ff5c00);
-  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.2);
-  transform: translateY(-2px);
+#dock .dock-button.active,
+#dock-message .dock-button.active {
+  background: #4772b3;
+  color: white;
+  border-color: rgba(0, 0, 0, 0.2);
+  box-shadow: none;
 }
+
+#dock .dock-button.active svg,
+#dock-message .dock-button.active svg {
+  stroke: white;
+}
+
+
 
 .selection-marquee {
   position: absolute;
@@ -644,4 +770,357 @@ body {
   border-radius: 6px;
   pointer-events: none;
   display: none;
+}
+
+/* =========================
+   MESSAGE SIDEBAR UI
+   ========================= */
+
+/* Update #rightSidebar transition base state */
+#rightSidebar {
+  /* Ensure transition works for fade/slide */
+  transition: opacity 0.3s ease, transform 0.3s ease, display 0.3s allow-discrete;
+  opacity: 0;
+  transform: translateX(20px);
+  pointer-events: none;
+  /* Interact only when visible */
+}
+
+#rightSidebar.visible {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+/* Header */
+.sidebar-message-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0;
+  border-bottom: none;
+  margin-bottom: 12px;
+}
+
+.sidebar-tabs-container {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.sidebar-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.sidebar-tab-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.sidebar-tab-btn.active {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.sidebar-tab-btn .tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar-tab-btn .tab-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.sidebar-message-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.sidebar-message-close:hover {
+  color: #fff;
+}
+
+/* Body */
+.sidebar-message-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  overflow-y: auto;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.sidebar-message-empty {
+  text-align: center;
+  padding: 20px;
+}
+
+.sidebar-message-empty .empty-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+  opacity: 0.7;
+}
+
+.sidebar-message-empty .empty-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.sidebar-message-empty .empty-subtext {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Footer (Input) */
+.sidebar-message-footer {
+  margin-top: 12px;
+  padding-top: 0;
+  border-top: none;
+  display: flex;
+  gap: 8px;
+}
+
+.sidebar-message-input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: white;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.sidebar-message-input:focus {
+  border-color: rgba(79, 140, 255, 0.6);
+}
+
+.sidebar-message-send {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(79, 140, 255, 0.2);
+  border: 1px solid rgba(79, 140, 255, 0.3);
+  border-radius: 8px;
+  color: #4f8cff;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.sidebar-message-send:hover {
+  background: rgba(79, 140, 255, 0.3);
+  color: white;
+}
+
+/* Chat Bubbles */
+.sidebar-message-body {
+  /* Ensure padding for messages */
+  padding: 12px;
+  align-items: stretch;
+  /* Allow bubbles to align left/right */
+  justify-content: flex-start;
+  /* Start from top */
+  gap: 8px;
+
+  /* Hide scrollbar (Transparent) */
+  scrollbar-width: none;
+  /* Firefox */
+}
+
+.sidebar-message-body::-webkit-scrollbar {
+  display: none;
+  /* Chrome/Safari */
+}
+
+.sidebar-message-row {
+  display: flex;
+  margin-bottom: 4px;
+}
+
+.sidebar-message-row.user {
+  justify-content: flex-end;
+}
+
+.sidebar-message-bubble {
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+
+.sidebar-message-row.user .sidebar-message-bubble {
+  background: #4f8cff;
+  color: white;
+  border-bottom-right-radius: 2px;
+}
+
+.sidebar-message-send svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* bimGPT Specific Styles */
+.sidebar-gpt-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  overflow-y: auto;
+  align-items: stretch;
+  gap: 12px;
+  scrollbar-width: none;
+}
+
+.sidebar-gpt-body::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar-gpt-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.8);
+  gap: 12px;
+}
+
+.gpt-logo {
+  width: 64px;
+  height: 64px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+.gpt-logo svg {
+  width: 32px;
+  height: 32px;
+}
+
+.gpt-welcome {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+
+.gpt-suggestions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+.gpt-suggestion-box {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 12px;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  /* Slightly smaller for density */
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+}
+
+.gpt-suggestion-box:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* =========================
+   LAYOUT MODEL UI
+   ========================= */
+#layout-model-wrapper {
+  position: fixed;
+  bottom: 16px;
+  /* Place to the left of the message dock (which is right: 16px) */
+  /* Message dock width is approx 56px? Let's check or use calc */
+  /* Assuming message dock is right: 16px, width ~38px + padding. 
+     Let's put this one at right: 70px to trigger "berdampingan di kiri" */
+  right: 78px;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+}
+
+#layout-model-toolbar {
+  display: flex;
+  background: rgba(0, 0, 0, 0.85);
+  /* Same glassmorphism base */
+  backdrop-filter: blur(20px);
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  gap: 4px;
+}
+
+.layout-model-button {
+  background: transparent;
+  border: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.layout-model-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+}
+
+.layout-model-button.active {
+  background: rgba(79, 140, 255, 0.2);
+  color: #4f8cff;
+}
+
+.layout-model-button svg {
+  width: 20px;
+  height: 20px;
 }

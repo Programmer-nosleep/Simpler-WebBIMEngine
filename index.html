@@ -1,80 +1,83 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Simpler - BIMEngine</title>
-  </head>
 
-  <body>
-    <div id="threejs"></div>
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simpler - BIMEngine</title>
+</head>
 
-    <!-- TOPBAR (NAVBAR PANELS) -->
-    <div id="ui-floating">
-      <div id="ui-panels">
-        <!-- Camera -->
-        <div class="control-panel">
-          <label for="projectionMode">Camera</label>
-          <div class="control-row">
-            <select id="projectionMode">
-              <option value="Perspective">Perspective</option>
-              <option value="Orthographic">Orthographic</option>
-            </select>
-            <button id="projectionToggle" type="button">Toggle</button>
-          </div>
+<body>
+  <div id="threejs"></div>
+
+  <!-- TOPBAR (NAVBAR PANELS) -->
+  <div id="ui-floating">
+    <div id="ui-panels">
+      <!-- Camera -->
+      <div class="control-panel">
+        <label for="projectionMode">Camera</label>
+        <div class="control-row">
+          <select id="projectionMode">
+            <option value="Perspective">Perspective</option>
+            <option value="Orthographic">Orthographic</option>
+          </select>
+          <button id="projectionToggle" type="button">Toggle</button>
         </div>
+      </div>
 
-        <!-- Navigation -->
-        <div class="control-panel">
-          <label for="navigationMode">Navigation</label>
-          <div class="control-row">
-            <select id="navigationMode">
-              <option value="Orbit">Orbit</option>
-              <option value="Plan">Plan</option>
-            </select>
-          </div>
+      <!-- Navigation -->
+      <div class="control-panel">
+        <label for="navigationMode">Navigation</label>
+        <div class="control-row">
+          <select id="navigationMode">
+            <option value="Orbit">Orbit</option>
+            <option value="Plan">Plan</option>
+          </select>
+          <button id="navigationToggle" type="button">Toggle</button>
         </div>
+      </div>
 
-        <!-- Import -->
-        <div class="control-panel">
-          <label for="importerFormat">Import</label>
-          <div class="control-row">
-            <input type="file" id="importer" accept=".ifc,.glb,.gltf,.obj,.dwg,.dxf" />
-            <button id="importButton" type="button">Import</button>
-          </div>
+      <!-- Import -->
+      <div class="control-panel">
+        <label for="importerFormat">Import</label>
+        <div class="control-row">
+          <input type="file" id="importer" accept=".ifc,.glb,.gltf,.obj,.dwg,.dxf" />
+          <button id="importButton" type="button">Import</button>
         </div>
+      </div>
 
-        <!-- Export -->
-        <div class="control-panel">
-          <label for="exporterFormat">Export</label>
-          <div class="control-row">
-            <select id="exporterFormat">
-              <option value="glb">GLB/GLTF</option>
-              <option value="obj">OBJ</option>
-              <option value="frag">FRAG (Fragments)</option>
-              <option value="schema">FRAGS Schema (JSON)</option>
-              <option value="ifc">IFC</option>
-            </select>
-            <button id="exportButton" type="button">Export</button>
-          </div>
+      <!-- Export -->
+      <div class="control-panel">
+        <label for="exporterFormat">Export</label>
+        <div class="control-row">
+          <select id="exporterFormat">
+            <option value="glb">GLB/GLTF</option>
+            <option value="obj">OBJ</option>
+            <option value="frag">FRAG (Fragments)</option>
+            <option value="schema">FRAGS Schema (JSON)</option>
+            <option value="ifc">IFC</option>
+          </select>
+          <button id="exportButton" type="button">Export</button>
         </div>
       </div>
     </div>
+  </div>
 
-    <!-- UI OVERLAY (sidebar kiri + kanan) -->
-    <div id="ui-overlay" aria-label="UI overlay">
-      <!-- SIDEBAR KIRI -->
-      <aside id="ui-sidebar-left" class="ui-sidebar" aria-label="Project views sidebar wrapper">
-        <div id="leftSidebar" aria-label="Project views sidebar"></div>
-      </aside>
+  <!-- UI OVERLAY (sidebar kiri + kanan) -->
+  <div id="ui-overlay" aria-label="UI overlay">
+    <!-- SIDEBAR KIRI -->
+    <aside id="ui-sidebar-left" class="ui-sidebar" aria-label="Project views sidebar wrapper">
+      <div id="leftSidebar" aria-label="Project views sidebar"></div>
+    </aside>
 
-      <!-- SIDEBAR KANAN -->
-      <aside id="ui-sidebar-right" class="ui-sidebar" aria-label="Project properties sidebar wrapper">
+    <!-- SIDEBAR KANAN -->
+    <!-- <aside id="ui-sidebar-right" class="ui-sidebar" aria-label="Project properties sidebar wrapper">
         <div id="rightSidebar" aria-label="Project properties sidebar"></div>
-      </aside>
-    </div>
+      </aside> -->
+  </div>
 
-    <script type="module" src="/src/main.ts"></script>
-  </body>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+
 </html>

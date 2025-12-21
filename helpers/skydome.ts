@@ -6,6 +6,7 @@ import * as THREE from "three";
  */
 export class SkyDomeHelper {
   public mesh: THREE.Mesh;
+  public onTimeChange?: (hour: number) => void;
   private uniforms: { [key: string]: { value: any } };
 
   constructor(scene: THREE.Scene, size = 500) {
@@ -87,6 +88,10 @@ export class SkyDomeHelper {
 
     this.uniforms.topColor.value.copy(cTop);
     this.uniforms.bottomColor.value.copy(cBot);
+
+    if (this.onTimeChange) {
+      this.onTimeChange(h);
+    }
   }
 }
 
@@ -101,7 +106,7 @@ export class SkyDomeUI {
 
   constructor(helper: SkyDomeHelper) {
     this.helper = helper;
-    
+
     this.container = document.createElement("div");
     this.container.className = "control-panel";
 
@@ -144,7 +149,7 @@ export class SkyDomeUI {
     slider.max = "22";
     slider.step = "0.05";
     slider.value = "6";
-    
+
     slider.oninput = (e: Event) => {
       const val = parseFloat((e.target as HTMLInputElement).value);
       this.update(val);
@@ -160,11 +165,11 @@ export class SkyDomeUI {
 
   private update(val: number) {
     this.helper.updateTime(val);
-    
+
     const h = Math.floor(val);
     const m = Math.floor((val - h) * 60);
     const timeStr = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-    
+
     this.timeLabel.innerText = timeStr;
   }
 }

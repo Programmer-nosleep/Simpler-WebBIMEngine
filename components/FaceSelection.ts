@@ -3,7 +3,7 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import type { FaceRegion, FaceTriangle } from "../utils/faceRegion";
+import { getCoplanarFaceRegionLocalToRoot, type FaceRegion, type FaceTriangle } from "../utils/faceRegion";
 
 export type FaceSelectionOptions = {
   scene: THREE.Scene;
@@ -36,7 +36,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     objectGeometry,
     faceMaterials,
     faceBaseColor,
-    faceHoverColor,
+    // faceHoverColor,
     canvas,
     camera,
   } = options;
@@ -582,10 +582,30 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   const pointer = new THREE.Vector2();
   let hoveredObject: THREE.Object3D | null = null;
   let hoveredFaceIndex: number | null = null;
+  let hoveredFaceTriangleIndex: number | undefined = undefined;
 
   // State untuk multi-selection
   let currentSelection: FaceSelectionItem[] = [];
   const activeOverlays = new Map<number, { group: THREE.Group; dots: THREE.Points; border: LineSegments2 }>();
+
+  // Hover Overlay
+  const hoverOverlayGroup = new THREE.Group();
+  hoverOverlayGroup.renderOrder = 4; // Higher than selection
+  const hoverDots = new THREE.Points(new THREE.BufferGeometry(), dotsMaterial.clone());
+  // White color for hover as requested "memutih"
+  (hoverDots.material as THREE.PointsMaterial).color.setHex(0xffffff);
+  hoverDots.renderOrder = 4;
+  hoverOverlayGroup.add(hoverDots);
+
+  const hoverBorder = new LineSegments2(new LineSegmentsGeometry(), faceBorderMaterial.clone());
+  hoverBorder.material.color.setHex(0xffffff);
+  hoverBorder.renderOrder = 5;
+  hoverOverlayGroup.add(hoverBorder);
+
+  // Helpers
+  hoverOverlayGroup.userData.isHelper = true;
+  hoverOverlayGroup.userData.selectable = false;
+  scene.add(hoverOverlayGroup);
 
   let showSelectedBorder = false;
 
@@ -621,11 +641,13 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       return typeof materialIndex === "number" && !!normal;
     });
 
-    const materialIndex = intersection?.face?.materialIndex;
-    const normal = intersection?.face?.normal;
+    if (!intersection) return null;
 
-    if (!intersection || typeof materialIndex !== "number" || !normal) return null;
-    return { object: intersection.object, materialIndex, normal: normal.clone() };
+    const materialIndex = intersection.face!.materialIndex;
+    const normal = intersection.face!.normal;
+    const faceIndex = intersection.faceIndex;
+
+    return { object: intersection.object, materialIndex, normal: normal.clone(), faceIndex };
   }
 
   function setFaceColor(object: THREE.Object3D, index: number, color: number) {
@@ -654,18 +676,66 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     });
 
     // Highlight Hovered (hanya jika tidak sedang diseleksi)
-    if (hoveredObject && hoveredFaceIndex !== null) {
-      const isSelected = currentSelection.some((item) => {
-        let current: THREE.Object3D | null = hoveredObject;
-        while (current) {
-          if (current === item.object) return true;
-          current = current.parent;
+    if (hoveredObject) {
+      hoverOverlayGroup.visible = true;
+
+      if (hoveredObject && (hoveredObject as THREE.Mesh).isMesh && typeof hoveredFaceTriangleIndex === 'number') {
+        const mesh = hoveredObject as THREE.Mesh;
+
+        // Use the helper to get the full coplanar region in World Space (root = scene)
+        // We cast to THREE.Intersection as we only need object and faceIndex
+        const fakeIntersection = {
+          object: mesh,
+          faceIndex: hoveredFaceTriangleIndex,
+          distance: 0,
+          point: new THREE.Vector3()
+        } as unknown as THREE.Intersection;
+
+        const region = getCoplanarFaceRegionLocalToRoot(fakeIntersection, scene);
+
+        if (region) {
+          hoverDots.geometry.dispose();
+          hoverDots.geometry = createRegionDotsGeometry(region.triangles, DOT_SPACING, SURFACE_OFFSET * 2);
+
+          hoverBorder.geometry.dispose();
+          hoverBorder.geometry = createRegionBorderGeometry(region.triangles, SURFACE_OFFSET * 2);
+
+          hoverBorder.material.resolution.set(canvas.width, canvas.height);
+        } else {
+          // Fallback: Just the single triangle if region failed (unlikely)
+          const geometry = mesh.geometry;
+          const getVertex = (index: number) => {
+            const pos = geometry.attributes.position;
+            return new THREE.Vector3(pos.getX(index), pos.getY(index), pos.getZ(index));
+          };
+
+          let vA: THREE.Vector3, vB: THREE.Vector3, vC: THREE.Vector3;
+          if (geometry.index) {
+            vA = getVertex(geometry.index.getX(hoveredFaceTriangleIndex * 3));
+            vB = getVertex(geometry.index.getX(hoveredFaceTriangleIndex * 3 + 1));
+            vC = getVertex(geometry.index.getX(hoveredFaceTriangleIndex * 3 + 2));
+          } else {
+            vA = getVertex(hoveredFaceTriangleIndex * 3);
+            vB = getVertex(hoveredFaceTriangleIndex * 3 + 1);
+            vC = getVertex(hoveredFaceTriangleIndex * 3 + 2);
+          }
+
+          vA.applyMatrix4(mesh.matrixWorld);
+          vB.applyMatrix4(mesh.matrixWorld);
+          vC.applyMatrix4(mesh.matrixWorld);
+
+          const triangle: FaceTriangle = [vA, vB, vC];
+
+          hoverDots.geometry.dispose();
+          hoverDots.geometry = createRegionDotsGeometry([triangle], DOT_SPACING, SURFACE_OFFSET * 2);
+
+          hoverBorder.geometry.dispose();
+          hoverBorder.geometry = createRegionBorderGeometry([triangle], SURFACE_OFFSET * 2);
+          hoverBorder.material.resolution.set(canvas.width, canvas.height);
         }
-        return false;
-      });
-      if (!isSelected) {
-        setFaceColor(hoveredObject, hoveredFaceIndex, faceHoverColor);
       }
+    } else {
+      hoverOverlayGroup.visible = false;
     }
 
     // Manage Overlays
@@ -889,6 +959,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     const hit = pickFace();
     hoveredObject = hit?.object ?? null;
     hoveredFaceIndex = hit?.materialIndex ?? null;
+    hoveredFaceTriangleIndex = hit?.faceIndex ?? undefined; // Capture the triangle face index
     canvas.style.cursor = hoveredObject ? "pointer" : "";
     updateSelectEffect();
   };
@@ -896,6 +967,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   const onPointerLeave = () => {
     hoveredObject = null;
     hoveredFaceIndex = null;
+    hoveredFaceTriangleIndex = undefined;
     canvas.style.cursor = "";
     updateSelectEffect();
   };
@@ -915,8 +987,10 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
       currentSelection = [];
     }
     showSelectedBorder = border && !!normal;
+    showSelectedBorder = border && !!normal;
     hoveredObject = null;
     hoveredFaceIndex = null;
+    hoveredFaceTriangleIndex = undefined;
     updateSelectEffect();
   };
 
@@ -962,6 +1036,11 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
         overlay.border.geometry.dispose();
       });
       activeOverlays.clear();
+      hoverOverlayGroup.removeFromParent();
+      hoverDots.geometry.dispose();
+      hoverDots.material.dispose();
+      hoverBorder.geometry.dispose();
+      hoverBorder.material.dispose();
       dotsMaterial.dispose();
       faceBorderMaterial.dispose();
     },

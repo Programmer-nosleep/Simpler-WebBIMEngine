@@ -15,6 +15,7 @@ const buttons: DockButton[] = [
   { id: "polygon", label: "Polygon", icon: "Octagon" },
   { id: "extrude", label: "Extrude", icon: "Extrude" },
   { id: "move", label: "Move", icon: "Move" },
+  { id: "group", label: "Group", icon: "Group" },
   { id: "orbitTool", label: "Orbit", icon: "Orbit" },
   { id: "chat", label: "Chat", icon: "ChatCircle" },
 ];
@@ -30,13 +31,14 @@ export type DockToolId =
   | "polygon"
   | "extrude"
   | "move"
+  | "group"
   | "orbitTool"
   | "chat";
 
 export type DockOptions = {
   container?: HTMLElement;
   initialTool?: DockToolId;
-  onToolChange?: (tool: DockToolId) => void;
+  onToolChange?: (tool: DockToolId | null) => void;
 };
 
 const iconCache = new Map<string, string>();
@@ -56,14 +58,32 @@ function createButton(button: DockButton, icon: string) {
   node.innerHTML = icon;
   node.setAttribute("aria-label", button.label);
   node.dataset.buttonId = button.id;
+
+  // tandai chat biar bisa distyle / dipush ke bawah
+  if (button.id === "chat") {
+    node.classList.add("dock-button--chat");
+  }
+
   return node;
 }
 
 export async function setupDock(options: DockOptions = {}) {
   const target = options.container ?? document.body;
+
+  const wrapper = document.createElement("div");
+  wrapper.id = "dock-wrapper";
+
   const dock = document.createElement("div");
   dock.id = "dock";
   dock.role = "toolbar";
+
+  // wrapper khusus untuk message/chat
+  const messageWrapper = document.createElement("div");
+  messageWrapper.id = "dock-message-wrapper";
+
+  const messageDock = document.createElement("div");
+  messageDock.id = "dock-message";
+  messageDock.role = "toolbar";
 
   const buttonElements = await Promise.all(
     buttons.map(async (button) => {
@@ -72,35 +92,49 @@ export async function setupDock(options: DockOptions = {}) {
     })
   );
 
-  buttonElements.forEach((btn) => dock.appendChild(btn));
-  target.appendChild(dock);
+  buttonElements.forEach((btn) => {
+    if (btn.dataset.buttonId === "chat") {
+      messageDock.appendChild(btn);
+    } else {
+      dock.appendChild(btn);
+    }
+  });
+
+  messageWrapper.appendChild(messageDock);
+
+  wrapper.appendChild(dock);
+  wrapper.appendChild(messageWrapper);
+  target.appendChild(wrapper);
 
   let activeTool: DockToolId | null = options.initialTool ?? null;
 
-  const setActive = (tool: DockToolId, optionsSet?: { silent?: boolean }) => {
+  const setActive = (tool: DockToolId | null, optionsSet?: { silent?: boolean }) => {
     activeTool = tool;
     buttonElements.forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.buttonId === tool);
     });
-    if (!optionsSet?.silent) {
-      options.onToolChange?.(tool);
-    }
+    if (!optionsSet?.silent) options.onToolChange?.(tool);
   };
 
   buttonElements.forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.dataset.buttonId as DockToolId;
-      setActive(id);
+      if (id === "chat" && activeTool === "chat") {
+        setActive(null);
+      } else {
+        setActive(id);
+      }
     });
   });
 
   if (activeTool) setActive(activeTool);
 
   return {
-    dock,
-    setActiveTool: (tool: DockToolId, setOptions?: { silent?: boolean }) => setActive(tool, setOptions),
+    dock: wrapper,
+    setActiveTool: (tool: DockToolId | null, setOptions?: { silent?: boolean }) =>
+      setActive(tool, setOptions),
     destroy() {
-      dock.remove();
+      wrapper.remove();
     },
   };
 }

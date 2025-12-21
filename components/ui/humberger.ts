@@ -1,10 +1,13 @@
-type IconName = "hamburger";
+type IconName = "hamburger" | "close";
 
 const ICONS: Record<IconName, string> = {
   hamburger: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <line x1="3" y1="12" x2="21" y2="12"></line>
     <line x1="3" y1="6" x2="21" y2="6"></line>
     <line x1="3" y1="18" x2="21" y2="18"></line>
+  </svg>`,
+  close: `<svg viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 3L9 9M9 3L3 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`,
 };
 
@@ -19,6 +22,7 @@ export type HamburgerHandle = {
   toggleRight: () => void;
 };
 
+// ... (existing ensureStyles function) ...
 function ensureStyles() {
   const styleId = "hamburger-styles";
   if (document.getElementById(styleId)) return;
@@ -65,8 +69,8 @@ function createButton(title: string, top: string, side: "left" | "right", sideVa
   btn.type = "button";
   btn.className = "hamburger-btn";
   btn.title = title;
-  btn.innerHTML = ICONS.hamburger;
-  
+  btn.innerHTML = ICONS.hamburger; // Default to hamburger (Open state)
+
   btn.style.top = top;
   if (side === "left") {
     btn.style.left = sideValue;
@@ -85,14 +89,24 @@ export function setupHamburger(root?: HTMLElement): HamburgerHandle {
   // Posisi: Top 20px, Left 12px (di atas LeftSidebar yang mulai di 70px)
   const leftBtn = createButton("Toggle Left Sidebar", "20px", "left", "12px");
   leftBtn.id = "hamburger-left-btn";
-  
+
   leftBtn.addEventListener("click", () => {
     const sidebar = document.getElementById("leftSidebar");
     if (sidebar) {
       const isHidden = sidebar.classList.toggle("sidebar-hidden");
       leftBtn.setAttribute("aria-expanded", String(!isHidden));
-      // Opsional: Ubah opacity tombol jika sidebar hidden agar user tahu statusnya
-      leftBtn.style.opacity = isHidden ? "0.6" : "1";
+
+      // Update opacity and icon based on state
+      // User request: "geser kiri ... ubah ke icon humberger jadi silang" 
+      // Interpreted: Closing (Hidden) -> Switch to Cross
+      if (isHidden) {
+        leftBtn.innerHTML = ICONS.close;
+        leftBtn.style.opacity = "1"; // Keep visible when hidden to allow opening
+      } else {
+        leftBtn.innerHTML = ICONS.hamburger;
+        leftBtn.style.opacity = "1";
+      }
+
       window.dispatchEvent(new CustomEvent(SIDEBAR_EVENTS.CHANGE, {
         detail: { side: "left", hidden: isHidden }
       }));
@@ -101,31 +115,14 @@ export function setupHamburger(root?: HTMLElement): HamburgerHandle {
   container.appendChild(leftBtn);
 
   // --- Tombol Kanan ---
-  // Posisi: Top 85px, Right 12px 
-  // (Gizmo biasanya di top 16px dengan tinggi ~90px, jadi kita taruh di bawah Gizmo 
-  // dan di atas RightSidebar yang mulai di 120px)
-  const rightBtn = createButton("Toggle Right Sidebar", "85px", "right", "12px");
-  rightBtn.id = "hamburger-right-btn";
-
-  rightBtn.addEventListener("click", () => {
-    const sidebar = document.getElementById("rightSidebar");
-    if (sidebar) {
-      const isHidden = sidebar.classList.toggle("sidebar-hidden");
-      rightBtn.setAttribute("aria-expanded", String(!isHidden));
-      rightBtn.style.opacity = isHidden ? "0.6" : "1";
-      window.dispatchEvent(new CustomEvent(SIDEBAR_EVENTS.CHANGE, {
-        detail: { side: "right", hidden: isHidden }
-      }));
-    }
-  });
-  container.appendChild(rightBtn);
+  // (Removed due to sidebar merge)
 
   // Listeners for external triggers (agar bisa di-trigger dari file lain)
   window.addEventListener(SIDEBAR_EVENTS.TOGGLE_LEFT, () => leftBtn.click());
-  window.addEventListener(SIDEBAR_EVENTS.TOGGLE_RIGHT, () => rightBtn.click());
+  // window.addEventListener(SIDEBAR_EVENTS.TOGGLE_RIGHT, () => rightBtn.click());
 
   return {
     toggleLeft: () => leftBtn.click(),
-    toggleRight: () => rightBtn.click(),
+    toggleRight: () => { /* no-op */ },
   };
 }

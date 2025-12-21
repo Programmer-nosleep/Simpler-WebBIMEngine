@@ -47,6 +47,16 @@ export class LineTool {
   private readonly SNAP_THRESHOLD = 0.3;
   private readonly AXIS_SNAP_PIXELS = 15;
 
+  private previewColor = new THREE.Color(0x000000); // Default to black
+
+  public setPreviewColor(color: THREE.Color) {
+    this.previewColor.copy(color);
+    if (this.previewLine && this.previewLine.material) {
+      const mat = this.previewLine.material as THREE.LineBasicMaterial;
+      if (mat.color) mat.color.copy(this.previewColor);
+    }
+  }
+
   constructor(
     scene: THREE.Scene,
     camera: THREE.Camera | (() => THREE.Camera),
@@ -305,6 +315,7 @@ export class LineTool {
 
   private onPointerDown = (e: PointerEvent) => {
     if (!this.enabled || e.button !== 0) return;
+
     // Cegah event bubbling agar tidak trigger orbit controls selection
     // e.stopPropagation(); 
 
@@ -364,8 +375,13 @@ export class LineTool {
 
     // Buat bidang (face) langsung ketika edge baru membentuk loop dengan edge lain
     // (termasuk edge yang berasal dari mesh yang sudah ada).
+    // (termasuk edge yang berasal dari mesh yang sudah ada).
     if (this.points.length >= 2) {
-      this.tryAutoCreateFaces({ includeMeshEdges: true, extraPolyline: this.points });
+      try {
+        this.tryAutoCreateFaces({ includeMeshEdges: true, extraPolyline: this.points });
+      } catch (e) {
+        console.error("Auto face creation failed (interactive):", e);
+      }
     }
 
     if (this.points.length === 1) {
@@ -554,6 +570,8 @@ export class LineTool {
     const mesh = new THREE.Mesh(geometry, material);
     const basis = new THREE.Matrix4().makeBasis(u, v, normal).setPosition(origin);
     mesh.applyMatrix4(basis);
+    mesh.userData.selectable = true; // Ensure explicitly selectable
+    mesh.userData.entityType = "face";
 
     const edges = new THREE.EdgesGeometry(geometry);
     const outline = new THREE.LineSegments(
@@ -799,7 +817,15 @@ export class LineTool {
     }
 
     // 4. Process Mesh Edges
-    if (includeMeshEdges) {
+    const supersededMeshes = new Set<THREE.Mesh>();
+
+    if (includeMeshEdges && splitters.length > 0) {
+      // Calculate Bounds of the "Hot Area" (Splitters)
+      const splitterBox = new THREE.Box3();
+      for (const s of splitters) splitterBox.expandByPoint(s);
+      // Expand slightly to catch collinear edges
+      splitterBox.expandByScalar(0.01);
+
       // Seed keys for mesh edges: must touch the known graph (splitters)
       const a = new THREE.Vector3();
       const b = new THREE.Vector3();
@@ -809,8 +835,40 @@ export class LineTool {
         if (obj.name === "SkyDome" || obj.name === "Grid" || obj.name === "AxesWorld" || (obj as any).isGridHelper) return;
         if (!(obj as any).isMesh) return;
 
+        // Check for Supersession (Coplanar + Intersects Bounds)
+        // If superseded, we MUST absorb ALL edges to rebuild the face.
+        let isSuperseded = false;
         const mesh = obj as THREE.Mesh;
-        if (mesh.userData?.entityType === "face") return; // outlines already handled above
+        if (mesh.userData?.entityType === "face") return; // outlines handled via lineSources
+
+        // Coplanar Check
+        // Ideally we check if mesh is on the current plane filter if present
+        if (planeFilter) {
+          const pos = new THREE.Vector3();
+          mesh.getWorldPosition(pos);
+          if (Math.abs(planeFilter.distanceToPoint(pos)) < 1e-2) {
+            // Normal Check
+            const q = new THREE.Quaternion();
+            mesh.getWorldQuaternion(q);
+            const norm = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+            if (Math.abs(norm.dot(planeFilter.normal)) > 0.9) {
+              // Bounds Check
+              if (mesh.geometry.boundingBox) {
+                // box is local, transform to world?
+                // Simple center check is faster but inaccurate.
+                // Let's use Box3 setFromObject
+                const box = new THREE.Box3().setFromObject(mesh);
+                if (splitterBox.intersectsBox(box)) {
+                  isSuperseded = true;
+                }
+              }
+            }
+          }
+        }
+
+        if (isSuperseded) {
+          supersededMeshes.add(mesh);
+        }
 
         const geom = mesh.geometry;
         if (!(geom instanceof THREE.BufferGeometry)) return;
@@ -824,23 +882,21 @@ export class LineTool {
           a.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mesh.matrixWorld);
           b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1)).applyMatrix4(mesh.matrixWorld);
 
-          // We check if this mesh edge connects to our splitter graph.
-          // BUT, we also check if any splitter LIES ON this edge.
-          // If a splitter lies on it, we definitively want to include (and split) it.
-          // If just endpoints match, we include it.
-
-          let relevant = false;
-          if (splitterKeys.has(keyOf(a)) || splitterKeys.has(keyOf(b))) {
-            relevant = true;
-          } else {
-            // Check if any splitter is on the segment
-            const dAB = a.distanceTo(b);
-            for (const v of splitters) {
-              const dAP = a.distanceTo(v);
-              const dPB = v.distanceTo(b);
-              if (Math.abs(dAP + dPB - dAB) < 1e-4) {
-                relevant = true;
-                break;
+          // If mesh is superseded, we absorb EVERYTHING.
+          // Otherwise, we only absorb "relevant" edges (touching splitters).
+          let relevant = isSuperseded;
+          if (!relevant) {
+            if (splitterKeys.has(keyOf(a)) || splitterKeys.has(keyOf(b))) {
+              relevant = true;
+            } else {
+              const dAB = a.distanceTo(b);
+              for (const v of splitters) {
+                const dAP = a.distanceTo(v);
+                const dPB = v.distanceTo(b);
+                if (Math.abs(dAP + dPB - dAB) < 1e-4) {
+                  relevant = true;
+                  break;
+                }
               }
             }
           }
@@ -918,16 +974,7 @@ export class LineTool {
     const areaEps = 1e-7;
     const maxWalkSteps = 10000;
 
-    const signedArea2D = (loop: number[], coords: Map<number, { x: number; y: number }>) => {
-      let sum = 0;
-      for (let i = 0; i < loop.length; i++) {
-        const a = coords.get(loop[i]);
-        const b = coords.get(loop[(i + 1) % loop.length]);
-        if (!a || !b) continue;
-        sum += a.x * b.y - a.y * b.x;
-      }
-      return sum * 0.5;
-    };
+
 
     const loopHasUserEdge = (loop: number[]) => {
       for (let i = 0; i < loop.length; i++) {
@@ -988,29 +1035,39 @@ export class LineTool {
       }
 
       const visitedDir = new Set<string>();
+      // Collect all valid loops first
+      type LoopData = {
+        indices: number[];
+        polygon: { x: number; y: number }[];
+        area: number;
+        hash: string;
+      };
+
+      const loopsFound: LoopData[] = [];
+
       for (const [startFrom, starts] of neighborOrder) {
         for (const startTo of starts) {
           const startKey = `${startFrom}->${startTo}`;
           if (visitedDir.has(startKey)) continue;
 
-          const loop: number[] = [];
+          const loopIndices: number[] = [];
           let from = startFrom;
           let to = startTo;
           let steps = 0;
 
           while (steps++ < maxWalkSteps) {
             visitedDir.add(`${from}->${to}`);
-            loop.push(from);
+            loopIndices.push(from);
 
             const toNeigh = neighborOrder.get(to);
             if (!toNeigh || toNeigh.length === 0) {
-              loop.length = 0;
+              loopIndices.length = 0;
               break;
             }
 
             const idx = neighborIndex.get(`${to}|${from}`);
             if (idx === undefined) {
-              loop.length = 0;
+              loopIndices.length = 0;
               break;
             }
 
@@ -1021,25 +1078,222 @@ export class LineTool {
             if (from === startFrom && to === startTo) break;
           }
 
-          if (loop.length < 3) continue;
+          if (loopIndices.length < 3) continue;
           if (!(from === startFrom && to === startTo)) continue;
 
-          const area = signedArea2D(loop, coords);
-          if (Math.abs(area) <= areaEps) continue; // ignore outer / degenerate
-          if (!loopHasUserEdge(loop)) continue;
+          // Check if loop has at least one user edge
+          if (!loopHasUserEdge(loopIndices)) continue;
 
-          const hash = loop.map((idx) => keys[idx]).sort().join("|");
-          if (this.createdFaceHashes.has(hash)) continue;
+          const poly: { x: number; y: number }[] = [];
+          for (const idx of loopIndices) {
+            const c = coords.get(idx);
+            if (c) poly.push(c);
+          }
+          if (poly.length < 3) continue;
 
-          const loopPoints = loop.map((idx) => vertices[idx]);
-          const mesh = this.createFaceFromLoop(loopPoints);
-          if (!mesh) continue;
+          // Compute signed area
+          let area = 0;
+          for (let i = 0; i < poly.length; i++) {
+            const a = poly[i];
+            const b = poly[(i + 1) % poly.length];
+            area += a.x * b.y - a.y * b.x;
+          }
+          area *= 0.5;
 
-          mesh.userData.selectable = true;
-          mesh.userData.loopHash = hash;
-          mesh.userData.entityType = "face";
-          this.scene.add(mesh);
-          this.createdFaceHashes.add(hash);
+          if (Math.abs(area) <= areaEps) continue;
+
+          // Ensure CCW winding for outer shapes (Three.js Shapes usually CCW)
+          // If area is negative, reverse
+          if (area < 0) {
+            loopIndices.reverse();
+            poly.reverse();
+            area = -area;
+          }
+
+          const hash = loopIndices.map((idx) => keys[idx]).sort().join("|");
+
+          loopsFound.push({
+            indices: loopIndices,
+            polygon: poly,
+            area,
+            hash
+          });
+        }
+      }
+
+      // Hierarchy Processing for Holes
+      // 1. Sort by Area Descending
+      loopsFound.sort((a, b) => b.area - a.area);
+
+      type HierarchyNode = {
+        data: LoopData;
+        children: HierarchyNode[];
+      };
+
+      const roots: HierarchyNode[] = [];
+
+      const isPointInsidePoly = (p: { x: number, y: number }, poly: { x: number, y: number }[]) => {
+        // Ray casting
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const xi = poly[i].x, yi = poly[i].y;
+          const xj = poly[j].x, yj = poly[j].y;
+          const intersect = ((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      };
+
+      const isPolyComputedInside = (inner: { x: number, y: number }[], outer: { x: number, y: number }[]) => {
+        // Check first point (sufficient for non-intersecting valid geometry)
+        return isPointInsidePoly(inner[0], outer);
+      };
+
+      for (const loop of loopsFound) {
+        // Find parent
+        // Because sorted by area, parent must be already processed (in roots or its descendants)
+        // We find the smallest node that contains this loop.
+
+        const findParent = (nodes: HierarchyNode[]): HierarchyNode | null => {
+          for (const node of nodes) {
+            if (isPolyComputedInside(loop.polygon, node.data.polygon)) {
+              const childMatch = findParent(node.children);
+              return childMatch ?? node;
+            }
+          }
+          return null;
+        };
+
+        const parent = findParent(roots);
+        if (parent) {
+          parent.children.push({ data: loop, children: [] });
+        } else {
+          roots.push({ data: loop, children: [] });
+        }
+      }
+
+      // Build Shapes from Hierarchy
+      // Level 0 (Roots) = Solid
+      // Level 1 (Children of Roots) = Holes
+      // Level 2 (Children of Level 1) = Solid (Islands)...
+
+      const shapesToCreate: { outer: LoopData, holes: LoopData[] }[] = [];
+
+      const processNode = (node: HierarchyNode) => {
+        // Create a face for this node
+        // Children are Holes in this face
+        const holes = node.children.map(c => c.data);
+        shapesToCreate.push({ outer: node.data, holes });
+
+        // Recursively process children to create their Own faces (Islands)
+        for (const child of node.children) {
+          processNode(child);
+        }
+      };
+
+      for (const root of roots) {
+        processNode(root);
+      }
+
+      const validHashesForPlane = new Set<string>();
+
+      // Create Meshes
+      for (const item of shapesToCreate) {
+        // Construct composite hash (Outer + Holes) because topology changed
+        // Sorting hashes ensures stability regardless of hole order
+        const compositeHash = [item.outer.hash, ...item.holes.map(h => h.hash)].sort().join("||");
+
+        validHashesForPlane.add(compositeHash);
+
+        if (this.createdFaceHashes.has(compositeHash)) continue;
+
+        // Build THREE.Shape
+        const shape = new THREE.Shape();
+        const outerPts = item.outer.polygon;
+        shape.moveTo(outerPts[0].x, outerPts[0].y);
+        for (let i = 1; i < outerPts.length; i++) shape.lineTo(outerPts[i].x, outerPts[i].y);
+        shape.closePath();
+
+        for (const holeLoop of item.holes) {
+          const holePath = new THREE.Path();
+          const holePts = holeLoop.polygon;
+          // Holes should be CW? shape.holes docs say it auto-detects or needs opposite winding.
+          // Using standard helper might be safer, but manual path is fine.
+          holePath.moveTo(holePts[0].x, holePts[0].y);
+          for (let i = 1; i < holePts.length; i++) holePath.lineTo(holePts[i].x, holePts[i].y);
+          holePath.closePath();
+          shape.holes.push(holePath);
+        }
+
+        const geometry = new THREE.ShapeGeometry(shape);
+        const material = new THREE.MeshBasicMaterial({
+          color: 0xcccccc,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        // Align mesh to place
+        const basis = new THREE.Matrix4().makeBasis(u, v, normal).setPosition(origin);
+        mesh.applyMatrix4(basis);
+
+        mesh.userData.selectable = true;
+        mesh.userData.entityType = "face";
+        mesh.userData.loopHash = compositeHash;
+
+        // Add outline
+        const edges = new THREE.EdgesGeometry(geometry);
+        const outline = new THREE.LineSegments(
+          edges,
+          new THREE.LineBasicMaterial({ color: 0x000000, depthWrite: false })
+        );
+        outline.userData.selectable = false;
+        outline.userData.isFaceOutline = true;
+        outline.renderOrder = 1;
+        mesh.add(outline);
+        (mesh.userData as any).__faceOutline = outline;
+
+        this.scene.add(mesh);
+        this.createdFaceHashes.add(compositeHash);
+      }
+
+      // Cleanup Pass: Remove faces on this plane that are no longer valid
+      const facesToRemove: THREE.Object3D[] = [];
+      this.scene.traverse((obj) => {
+        if (obj.userData?.entityType !== "face") return;
+        if (!obj.userData?.loopHash) return;
+
+        // Check if on this plane
+        if ((obj as any).isMesh) {
+          const pos = new THREE.Vector3();
+          obj.getWorldPosition(pos);
+          if (Math.abs(plane.distanceToPoint(pos)) > 1e-3) return;
+
+          const q = new THREE.Quaternion();
+          obj.getWorldQuaternion(q);
+          const objNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+          if (Math.abs(objNormal.dot(plane.normal)) < 0.9) return;
+
+          if (!validHashesForPlane.has(obj.userData.loopHash)) {
+            facesToRemove.push(obj);
+          }
+        }
+      });
+
+      for (const face of facesToRemove) {
+        this.scene.remove(face);
+        if ((face as any).geometry) (face as any).geometry.dispose();
+        this.createdFaceHashes.delete(face.userData.loopHash);
+      }
+
+      // Cleanup Superseded Meshes (Foreign faces that we fully rebuilt)
+      for (const mesh of supersededMeshes) {
+        this.scene.remove(mesh);
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.userData.loopHash) {
+          this.createdFaceHashes.delete(mesh.userData.loopHash);
         }
       }
     }
@@ -1118,8 +1372,12 @@ export class LineTool {
       console.error("LineTool onLineCreated callback failed:", error);
     }
 
-    if ((object as any).isLine) {
-      this.tryAutoCreateFaces({ includeMeshEdges: true });
+    try {
+      if (this.points.length >= 2) {
+        this.tryAutoCreateFaces({ includeMeshEdges: true });
+      }
+    } catch (e) {
+      console.error("Auto face creation failed:", e);
     }
 
     this.points = [];
@@ -1165,7 +1423,7 @@ export class LineTool {
 
     if (!this.previewLine) {
       const material = new THREE.LineBasicMaterial({
-        color: 0x000000,
+        color: this.previewColor,
         depthTest: false,
         depthWrite: false,
       });

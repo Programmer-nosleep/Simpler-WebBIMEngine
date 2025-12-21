@@ -1,17 +1,20 @@
 import * as THREE from "three";
 import { splitFloorsWithNewRect } from "../../helpers/polygon-clipper";
 
-function makeMaterial(color = 0xffffff, opacity = 1.0) {
+const SURFACE_OFFSET = 0.001;
+const OUTLINE_OFFSET = 0.0005;
+
+function makeMaterial(color = 0xffffff) {
 	return new THREE.MeshStandardMaterial({
 		color,
-		transparent: opacity < 1,
-		opacity,
+		transparent: false,
+		opacity: 1.0,
 		side: THREE.DoubleSide,
 	});
 }
 
 function makeEdgeMaterial(color = 0x000000) {
-	return new THREE.LineBasicMaterial({ color });
+	return new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false });
 }
 
 export class RectangleTool {
@@ -29,6 +32,7 @@ export class RectangleTool {
 	private mouse = new THREE.Vector2();
 	private raycaster = new THREE.Raycaster();
 	private planeXZ = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+	private tempVec3 = new THREE.Vector3();
 
 	constructor(
 		scene: THREE.Scene,
@@ -111,9 +115,18 @@ export class RectangleTool {
 
 		this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
+		const groundY = this.getGroundY();
+		this.planeXZ.constant = -(groundY + SURFACE_OFFSET);
+
 		const hit = new THREE.Vector3();
 		if (this.raycaster.ray.intersectPlane(this.planeXZ, hit)) return hit;
 		return null;
+	}
+
+	private getGroundY() {
+		const groundRef =
+			this.scene.getObjectByName("Grid") ?? this.scene.getObjectByName("AxesWorld");
+		return groundRef ? groundRef.getWorldPosition(this.tempVec3).y : 0;
 	}
 
 	private updatePreview(p1: THREE.Vector3, p2: THREE.Vector3) {
@@ -130,13 +143,13 @@ export class RectangleTool {
 		if (!this.previewMesh) {
 			const geom = new THREE.PlaneGeometry(1, 1);
 			geom.rotateX(-Math.PI / 2);
-			this.previewMesh = new THREE.Mesh(geom, makeMaterial(0x99ccff, 0.5));
+			this.previewMesh = new THREE.Mesh(geom, makeMaterial(0x99ccff));
 			this.previewMesh.userData.isHelper = true;
 			this.previewMesh.userData.selectable = false;
 			this.scene.add(this.previewMesh);
 		}
 
-		this.previewMesh.position.set(cx, -0.5, cz);
+		this.previewMesh.position.set(cx, p1.y, cz);
 		this.previewMesh.scale.set(width, 1, length);
 
 		if (!this.previewEdge) {
@@ -150,10 +163,11 @@ export class RectangleTool {
 			this.previewEdge = new THREE.LineLoop(g, makeEdgeMaterial());
 			this.previewEdge.userData.isHelper = true;
 			this.previewEdge.userData.selectable = false;
+			this.previewEdge.renderOrder = 1001;
 			this.scene.add(this.previewEdge);
 		}
 
-		this.previewEdge.position.set(cx, -0.499, cz);
+		this.previewEdge.position.set(cx, p1.y + OUTLINE_OFFSET, cz);
 		this.previewEdge.scale.set(width, 1, length);
 	}
 
@@ -164,11 +178,12 @@ export class RectangleTool {
 		const length = this.previewMesh.scale.z;
 		const cx = this.previewMesh.position.x;
 		const cz = this.previewMesh.position.z;
+		const cy = this.anchor.y;
 
 		const geometry = new THREE.PlaneGeometry(1, 1);
 		geometry.rotateX(-Math.PI / 2);
-		const mesh = new THREE.Mesh(geometry, makeMaterial(0xcccccc, 0.5));
-		mesh.position.set(cx, -0.5, cz);
+		const mesh = new THREE.Mesh(geometry, makeMaterial(0xcccccc));
+		mesh.position.set(cx, cy, cz);
 		mesh.scale.set(width, 1, length);
 
 		mesh.userData = {
@@ -251,7 +266,7 @@ export class RectangleTool {
 			if (Number.isFinite(w) && Number.isFinite(l) && w > 0 && l > 0 && this.anchor) {
 				this.updatePreview(
 					this.anchor,
-					new THREE.Vector3(this.anchor.x + w, 0, this.anchor.z + l)
+					new THREE.Vector3(this.anchor.x + w, this.anchor.y, this.anchor.z + l)
 				);
 				this.finalize();
 			}

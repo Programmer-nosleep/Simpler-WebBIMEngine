@@ -17,6 +17,8 @@ type MultiPolygon = MultiPoly2;
 // Numeric & ring helpers
 // --------------------------------------------------------
 const SNAP_EPS = 1e-5;
+const SURFACE_OFFSET = 0.001;
+const OUTLINE_OFFSET = 0.0005;
 
 // --- util kecil buat “snap” angka supaya grid-nya rapi & ngilangin 0.4999999 ---
 const snap = (v: number, eps = SNAP_EPS): number => {
@@ -27,6 +29,16 @@ const snap = (v: number, eps = SNAP_EPS): number => {
 
 // Backwards-compat helper (dipakai banyak di atas)
 const snapCoord = (v: number) => snap(v, SNAP_EPS);
+
+// const _tmpWorldV3 = new THREE.Vector3();
+
+// function ringLocalXZToWorld(mesh: THREE.Object3D, ring: Ring2D): Ring2D {
+//   mesh.updateWorldMatrix(true, false);
+//   return ring.map(([x, z]) => {
+//     _tmpWorldV3.set(x, 0, z).applyMatrix4(mesh.matrixWorld);
+//     return [_tmpWorldV3.x, _tmpWorldV3.z] as [number, number];
+//   });
+// }
 
 export const ensureClosedRing = (ring: Ring2D | null | undefined): Ring2D => {
   if (!ring || !ring.length) return [];
@@ -195,6 +207,12 @@ function meshSurfaceToPoly2D(mesh: THREE.Mesh): MultiPoly | null {
 
 // Helper: ambil data poligon dari userData.surfaceMeta ATAU bounding box (world-space)
 function meshToPolygon2D(mesh: THREE.Mesh): Poly2 | null {
+  // Prefer the same decoding path used by splitFloorsWithNewRect(), but as Poly2.
+  const mp = meshSurfaceToPoly2D(mesh);
+  if (mp && mp.length && mp[0] && mp[0][0] && mp[0][0].length >= 3) {
+    return mp[0];
+  }
+
   const ud: any = mesh.userData || {};
   const meta = ud.surfaceMeta || {};
   const kind = meta.kind || ud.mode;
@@ -332,6 +350,7 @@ function buildFloorMeshFromRing(
   ring: Ring2D,
   opts: {
     depth: number;
+    planeY?: number;
     fillColor?: number;
     fillOpacity?: number;
   }
@@ -363,12 +382,13 @@ function buildFloorMeshFromRing(
 
   const mat = new THREE.MeshStandardMaterial({
     color: opts.fillColor ?? 0xffffff,
-    transparent: true,
-    opacity: opts.fillOpacity ?? 0.5,
+    transparent: false,
+    opacity: 1,
     side: THREE.DoubleSide,
   });
 
   const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.y = Number.isFinite(opts.planeY) ? Number(opts.planeY) : SURFACE_OFFSET;
 
   // Hitung center & simpan meta poly
   const bbox = new THREE.Box3().setFromObject(mesh);
@@ -405,49 +425,41 @@ function addOutlineFromRing(parent: THREE.Mesh, ring: Ring2D) {
     const closed = ensureClosedRing(ring);
     if (!closed || closed.length < 2) return;
 
-    // buang duplikat titik terakhir saat looping segmen
-    const pts = cleanRingForGeometry(closed);
-    if (!pts.length) return;
+    // Buang titik penutup duplikat & rapihin duplikat berurutan biar outline gak "pecah".
+    const raw = cleanRingForGeometry(closed);
+    if (raw.length < 2) return;
 
-    const lineWidth = 0.02;
-    const lineHeight = 0.001;
-
-    for (let i = 0; i < pts.length; i++) {
-      const [x0, z0] = pts[i];
-      const [x1, z1] = pts[(i + 1) % pts.length];
-
-      const a = new THREE.Vector3(x0, 0, z0);
-      const b = new THREE.Vector3(x1, 0, z1);
-      const length = a.distanceTo(b);
-      if (!Number.isFinite(length) || length < 1e-6) continue;
-
-      const dir = new THREE.Vector3().subVectors(b, a);
-      const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
-
-      const geom = new THREE.BoxGeometry(length, lineWidth, lineHeight);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0x000000,
-        transparent: false,
-      });
-      const lineMesh = new THREE.Mesh(geom, mat);
-
-      lineMesh.position.copy(mid);
-      lineMesh.position.y = lineHeight / 2;
-      lineMesh.rotation.y = Math.atan2(dir.z, dir.x);
-
-      (lineMesh.userData as any) = {
-        ...(lineMesh.userData || {}),
-        type: "line",
-        selectable: false,
-        isHelper: true,
-        isThickOutline: true,
-        isFloorOutline: true,
-        isConnection: false,
-        locked: true,
-      };
-
-      parent.add(lineMesh);
+    const pts: THREE.Vector3[] = [];
+    let last: THREE.Vector3 | null = null;
+    for (const [x, z] of raw) {
+      const p = new THREE.Vector3(x, 0, z);
+      if (last && p.distanceToSquared(last) < 1e-10) continue;
+      pts.push(p);
+      last = p;
     }
+    if (pts.length < 2) return;
+
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x000000,
+      depthTest: true,
+      depthWrite: false,
+    });
+    const outline = new THREE.LineLoop(geom, mat);
+    outline.renderOrder = 3;
+    outline.position.y = OUTLINE_OFFSET;
+
+    (outline.userData as any) = {
+      ...(outline.userData || {}),
+      type: "line",
+      selectable: false,
+      isHelper: true,
+      isFloorOutline: true,
+      isConnection: false,
+      locked: true,
+    };
+
+    parent.add(outline);
   } catch {
     /* noop */
   }
@@ -464,6 +476,11 @@ export function splitFloorsWithNewRect(
   const newPoly = normalizeMultiPoly(meshSurfaceToPoly2D(newRectMesh));
   if (isEmptyMultiPoly(newPoly)) return [];
 
+  const levelTolerance = 1e-3;
+  newRectMesh.updateWorldMatrix(true, true);
+  const boxNew = new THREE.Box3().setFromObject(newRectMesh);
+  const planeYTarget = (boxNew.min.y + boxNew.max.y) / 2;
+
   // di sini kita yakin newPoly bukan null lagi → pakai !
   let remainingNew: MultiPoly = newPoly!;
 
@@ -475,9 +492,16 @@ export function splitFloorsWithNewRect(
     if (obj === newRectMesh) return;
     const ud: any = obj.userData || {};
     if (ud.type !== "surface") return;
+    if (ud.isExtruded === true) return;
     if (ud.QreaseeCategory && ud.QreaseeCategory !== "Floor") return;
     const kind = ud.surfaceMeta?.kind;
     if (kind !== "rect" && kind !== "poly" && kind !== "circle") return;
+
+    (anyObj as THREE.Object3D).updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(anyObj as THREE.Object3D);
+    const yMid = (box.min.y + box.max.y) / 2;
+    if (Math.abs(yMid - planeYTarget) > levelTolerance) return;
+
     existing.push(anyObj as THREE.Mesh);
   });
 
@@ -555,6 +579,7 @@ export function splitFloorsWithNewRect(
       const ring = poly[0]; // ignore holes untuk sekarang
       const mesh = buildFloorMeshFromRing(ring, {
         depth: region.depth,
+        planeY: planeYTarget,
         fillColor: opts.fillColor,
         fillOpacity: opts.fillOpacity,
       });
