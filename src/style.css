@@ -780,6 +780,7 @@ body {
 #rightSidebar {
   /* Ensure transition works for fade/slide */
   transition: opacity 0.3s ease, transform 0.3s ease, display 0.3s allow-discrete;
+  height: 100%;
   opacity: 0;
   transform: translateX(20px);
   pointer-events: none;
