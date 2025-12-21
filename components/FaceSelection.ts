@@ -581,7 +581,7 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   let hoveredObject: THREE.Object3D | null = null;
-  let hoveredFaceIndex: number | null = null;
+  // hoveredFaceIndex removed
   let hoveredFaceTriangleIndex: number | undefined = undefined;
 
   // State untuk multi-selection
@@ -958,7 +958,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
     const hit = pickFace();
     hoveredObject = hit?.object ?? null;
-    hoveredFaceIndex = hit?.materialIndex ?? null;
+    hoveredObject = hit?.object ?? null;
+    // hoveredFaceIndex = hit?.materialIndex ?? null;
     hoveredFaceTriangleIndex = hit?.faceIndex ?? undefined; // Capture the triangle face index
     canvas.style.cursor = hoveredObject ? "pointer" : "";
     updateSelectEffect();
@@ -966,7 +967,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
 
   const onPointerLeave = () => {
     hoveredObject = null;
-    hoveredFaceIndex = null;
+    hoveredObject = null;
+    // hoveredFaceIndex = null;
     hoveredFaceTriangleIndex = undefined;
     canvas.style.cursor = "";
     updateSelectEffect();
@@ -989,7 +991,8 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     showSelectedBorder = border && !!normal;
     showSelectedBorder = border && !!normal;
     hoveredObject = null;
-    hoveredFaceIndex = null;
+    hoveredObject = null;
+    // hoveredFaceIndex = null;
     hoveredFaceTriangleIndex = undefined;
     updateSelectEffect();
   };
@@ -1010,9 +1013,9 @@ export function setupFaceSelection(options: FaceSelectionOptions) {
     updateSelectEffect();
   };
 
-  const setHovered = (object: THREE.Object3D | null, faceIndex: number | null) => {
+  const setHovered = (object: THREE.Object3D | null, _faceIndex: number | null) => {
     hoveredObject = object;
-    hoveredFaceIndex = faceIndex;
+    // hoveredFaceIndex = faceIndex;
     canvas.style.cursor = hoveredObject ? "pointer" : "";
     updateSelectEffect();
   };
