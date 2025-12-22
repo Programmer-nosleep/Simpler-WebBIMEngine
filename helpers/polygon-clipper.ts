@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import pc from "polygon-clipping";
+import * as pc from "polygon-clipping";
 // import { fallbackMapIFC } from "@/components/custom/SceneCanvas/utils/objectFactory";
 import { disposeObjectDeep } from "../utils/threeHelpers";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
