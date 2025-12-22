@@ -52,12 +52,9 @@ export function disposeCachedHollowSolids(mesh: THREE.Mesh) {
 function setCachedHollowSolids(mesh: THREE.Mesh, entry: HollowSolidsCacheEntry) {
   const prev = hollowSolidsCache.get(mesh);
   if (prev) {
-    try {
-      prev.outer.dispose();
-    } catch { }
-    try {
-      prev.void.dispose();
-    } catch { }
+    prev.outer.dispose();
+    prev.void.dispose();
+    hollowSolidsCache.delete(mesh);
   }
   hollowSolidsCache.set(mesh, entry);
 }

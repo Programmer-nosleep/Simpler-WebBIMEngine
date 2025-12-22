@@ -131,6 +131,7 @@ const init = async () => {
 		container,
 		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
 	);
+
 	const polygonTool = new PolygonTool(
 		cameraScene.scene,
 		getCamera,
@@ -236,6 +237,7 @@ const init = async () => {
 		rectangleTool,
 		circleTool,
 		arcTool,
+
 		polygonTool,
 		moveTool,
 		extrudeTool,
@@ -854,6 +856,7 @@ const setupDockSystem = async (
 	rectangleTool: RectangleTool,
 	circleTool: CircleTool,
 	arcTool: ArcTool,
+
 	polygonTool: PolygonTool,
 	moveTool: MoveTool,
 	extrudeTool: ExtrudeTool,
@@ -877,10 +880,10 @@ const setupDockSystem = async (
 		rectangleTool.disable();
 		circleTool.disable();
 		arcTool.disable();
+
 		polygonTool.disable();
 		moveTool.disable();
 		extrudeTool.disable();
-		sectionTool.disable();
 		sectionTool.disable();
 		selectionSystem.selectionMarquee.disable();
 		faceSelection.setSelectionByNormal(null);
@@ -948,7 +951,7 @@ const setupDockSystem = async (
 					controls.mouseButtons.right = THREE.MOUSE.PAN;
 				}
 			} else if (tool === "line") {
-				// cameraScene.setNavigationMode("Plan");
+				cameraScene.setNavigationMode("Plan");
 			} else if (tool === "rectangle" || tool === "circle" || tool === "arc" || tool === "polygon") {
 				// Opsional: Atur navigasi khusus jika diperlukan
 			} else if (tool === "move") {

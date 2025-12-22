@@ -8,10 +8,9 @@ const buttons: DockButton[] = [
   { id: "select", label: "Select", icon: "NavigationArrow" },
   { id: "hand", label: "Hand (Plan)", icon: "BackHand" },
   { id: "section", label: "Section", icon: "Section" },
-  { id: "bezier", label: "Bezier", icon: "BezierCurve" },
   { id: "line", label: "Line", icon: "Line" },
   { id: "circle", label: "Circle", icon: "Circle" },
-  { id: "arc", label: "Arc", icon: "Arc" },
+  { id: "arc", label: "Arc", icon: "BezierCurve" },
   { id: "rectangle", label: "Rectangle", icon: "Rectangle" },
   { id: "polygon", label: "Polygon", icon: "Octagon" },
   { id: "extrude", label: "Extrude", icon: "Extrude" },
@@ -25,7 +24,6 @@ export type DockToolId =
   | "select"
   | "hand"
   | "section"
-  | "bezier"
   | "line"
   | "circle"
   | "arc"
@@ -47,10 +45,18 @@ const iconCache = new Map<string, string>();
 
 async function fetchIcon(name: string): Promise<string> {
   if (iconCache.has(name)) return iconCache.get(name)!;
-  const response = await fetch(`/assets/icon/${name}.svg`);
-  const text = await response.text();
-  iconCache.set(name, text);
-  return text;
+  try {
+    const response = await fetch(`/assets/icon/${name}.svg`);
+    if (!response.ok) throw new Error("Icon not found");
+    const text = await response.text();
+    // Basic validation: ensure it looks like SVG
+    if (!text.trim().startsWith("<svg")) throw new Error("Invalid SVG");
+    iconCache.set(name, text);
+    return text;
+  } catch (e) {
+    console.error(`Failed to load icon ${name}:`, e);
+    return `<svg viewBox="0 0 24 24"><text x="0" y="20" font-size="20">?</text></svg>`; // Fallback
+  }
 }
 
 function createButton(button: DockButton, icon: string) {
