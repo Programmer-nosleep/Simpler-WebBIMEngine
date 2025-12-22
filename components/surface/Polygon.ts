@@ -3,7 +3,7 @@ import { ensureClosedRing, splitFloorsWithNewRect } from "../../helpers/polygon-
 import { IntersectionHelper } from "../../helpers/intersection-helper";
 import { IntersectionGuide } from "../../helpers/intersection-guide";
 import { SnappingHelper } from "../../helpers/snapping-helper";
-import { type FaceData, projectPointToFacePlane, localToWorldPoint, createLocalToWorldMatrix } from "../../helpers/face-detector";
+// import { type FaceData } from "../../helpers/face-detector";
 
 const SURFACE_OFFSET = 0.001;
 // const OUTLINE_OFFSET = 0.0005; // Removed in favor of polygonOffset
@@ -64,9 +64,9 @@ export class PolygonTool {
 	private setCameraZoom?: (enabled: boolean) => void;
 
 	// Face-based drawing
-	private currentDrawingFace: FaceData | null = null;
+	// private currentDrawingFace: FaceData | null = null;
 	private drawingPlane: THREE.Plane | null = null;
-	private localToWorldMatrix: THREE.Matrix4 = new THREE.Matrix4();
+	// private localToWorldMatrix: THREE.Matrix4 = new THREE.Matrix4();
 
 	constructor(
 		scene: THREE.Scene,

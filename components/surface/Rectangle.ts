@@ -3,10 +3,10 @@ import { splitFloorsWithNewRect } from "../../helpers/polygon-clipper";
 import { IntersectionHelper } from "../../helpers/intersection-helper";
 import { IntersectionGuide } from "../../helpers/intersection-guide";
 import { SnappingHelper } from "../../helpers/snapping-helper";
-import { type FaceData, createLocalToWorldMatrix } from "../../helpers/face-detector";
+// import { type FaceData } from "../../helpers/face-detector";
 
 const SURFACE_OFFSET = 0.001;
-const OUTLINE_OFFSET = 0.0005;
+const OUTLINE_OFFSET = 0.0005; // Removed in favor of polygonOffset
 
 function makeMaterial(color = 0xffffff) {
 	return new THREE.MeshStandardMaterial({
@@ -46,8 +46,8 @@ export class RectangleTool {
 	private setCameraZoom?: (enabled: boolean) => void;
 
 	// Face-based drawing
-	private currentDrawingFace: FaceData | null = null;
-	private drawingPlane: THREE.Plane | null = null;
+	// private currentDrawingFace: FaceData | null = null;
+	// private drawingPlane: THREE.Plane | null = null;
 
 	constructor(
 		scene: THREE.Scene,

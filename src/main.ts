@@ -16,6 +16,7 @@ import { createSelectionMarquee, type SelectionRect } from "../components/tools/
 import { LineTool } from "../components/Line";
 import { RectangleTool } from "../components/surface/Rectangle";
 import { CircleTool } from "../components/surface/Circle";
+import { ArcTool } from "../components/Arc";
 import { PolygonTool } from "../components/surface/Polygon";
 import { MoveTool } from "../components/Move";
 import { ExtrudeTool } from "../components/Extrude";
@@ -119,6 +120,12 @@ const init = async () => {
 		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
 	);
 	const circleTool = new CircleTool(
+		cameraScene.scene,
+		getCamera,
+		container,
+		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
+	);
+	const arcTool = new ArcTool(
 		cameraScene.scene,
 		getCamera,
 		container,
@@ -228,6 +235,7 @@ const init = async () => {
 		lineTool,
 		rectangleTool,
 		circleTool,
+		arcTool,
 		polygonTool,
 		moveTool,
 		extrudeTool,
@@ -845,6 +853,7 @@ const setupDockSystem = async (
 	lineTool: LineTool,
 	rectangleTool: RectangleTool,
 	circleTool: CircleTool,
+	arcTool: ArcTool,
 	polygonTool: PolygonTool,
 	moveTool: MoveTool,
 	extrudeTool: ExtrudeTool,
@@ -867,6 +876,7 @@ const setupDockSystem = async (
 		lineTool.disable();
 		rectangleTool.disable();
 		circleTool.disable();
+		arcTool.disable();
 		polygonTool.disable();
 		moveTool.disable();
 		extrudeTool.disable();
@@ -902,6 +912,8 @@ const setupDockSystem = async (
 			rectangleTool.enable();
 		} else if (tool === "circle") {
 			circleTool.enable();
+		} else if (tool === "arc") {
+			arcTool.enable();
 		} else if (tool === "polygon") {
 			polygonTool.enable();
 		} else if (tool === "move") {
@@ -937,7 +949,7 @@ const setupDockSystem = async (
 				}
 			} else if (tool === "line") {
 				// cameraScene.setNavigationMode("Plan");
-			} else if (tool === "rectangle" || tool === "circle" || tool === "polygon") {
+			} else if (tool === "rectangle" || tool === "circle" || tool === "arc" || tool === "polygon") {
 				// Opsional: Atur navigasi khusus jika diperlukan
 			} else if (tool === "move") {
 				cameraScene.setNavigationMode("Orbit");
