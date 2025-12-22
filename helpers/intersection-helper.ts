@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { detectFaceUnderCursor, type FaceData } from "./face-detector";
 
 export type IntersectionResult = {
   point: THREE.Vector3;
@@ -31,7 +32,7 @@ export class IntersectionHelper {
     options?: { includeAdjacentMidpoints?: boolean }
   ): IntersectionResult | null {
     let best: IntersectionResult | null = null;
-    
+
     // Gunakan endpoint dan tambahkan midpoint sebagai referensi intersection
     const targets: THREE.Vector3[] = [...candidatePoints];
     const includeMidpoints = options?.includeAdjacentMidpoints ?? true;
@@ -105,7 +106,7 @@ export class IntersectionHelper {
         // Proyeksi ke layar untuk cek jarak mouse
         const camera = this.getCamera();
         const pScreen = candidate.clone().project(camera);
-        
+
         // Pastikan titik intersection berada di depan kamera (mencegah ghosting/noise)
         if (pScreen.z < -1 || pScreen.z > 1) continue;
 
@@ -132,5 +133,43 @@ export class IntersectionHelper {
       }
     }
     return bestLocal;
+  }
+
+  /**
+   * Detects the best face under cursor for drawing shapes
+   * @param mouseScreen - Mouse position in screen coordinates (pixels)
+   * @param scene - Scene to raycast against
+   * @param options - Configuration options
+   * @returns FaceData if a suitable face is found, null otherwise
+   */
+  public getBestFaceForDrawing(
+    mouseScreen: THREE.Vector2,
+    scene: THREE.Scene,
+    options?: {
+      excludeGround?: boolean;
+      maxDistance?: number;
+    }
+  ): FaceData | null {
+    const camera = this.getCamera();
+    const rect = this.container.getBoundingClientRect();
+
+    // Convert screen coords to NDC
+    const mouse = new THREE.Vector2(
+      ((mouseScreen.x - rect.left) / rect.width) * 2 - 1,
+      -((mouseScreen.y - rect.top) / rect.height) * 2 + 1
+    );
+
+    // Create raycaster
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+
+    // Detect face
+    const faceData = detectFaceUnderCursor(raycaster, scene, {
+      excludeHelpers: true,
+      excludeGround: options?.excludeGround,
+      maxDistance: options?.maxDistance,
+    });
+
+    return faceData;
   }
 }

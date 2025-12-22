@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import { splitFloorsWithNewRect } from "../../helpers/polygon-clipper";
+import { IntersectionHelper } from "../../helpers/intersection-helper";
+import { IntersectionGuide } from "../../helpers/intersection-guide";
+import { SnappingHelper } from "../../helpers/snapping-helper";
 
 const SURFACE_OFFSET = 0.001;
 // const OUTLINE_OFFSET = 0.0005; // Removed in favor of polygonOffset
@@ -52,14 +55,27 @@ export class CircleTool {
 	private planeXZ = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 	private tempVec3 = new THREE.Vector3();
 
+	// Helpers
+	private intersectionHelper: IntersectionHelper;
+	private intersectionGuide: IntersectionGuide;
+	private snappingHelper: SnappingHelper;
+	private connectorDot: THREE.Sprite | null = null; // Replaced snapMarker
+	private setCameraZoom?: (enabled: boolean) => void;
+
 	constructor(
 		scene: THREE.Scene,
 		camera: THREE.Camera | (() => THREE.Camera),
-		container: HTMLElement
+		container: HTMLElement,
+		options?: { setCameraZoom?: (enabled: boolean) => void }
 	) {
 		this.scene = scene;
 		this.getCamera = typeof camera === "function" ? camera : () => camera;
 		this.container = container;
+		this.setCameraZoom = options?.setCameraZoom;
+
+		this.intersectionHelper = new IntersectionHelper(this.getCamera, container);
+		this.intersectionGuide = new IntersectionGuide(scene);
+		this.snappingHelper = new SnappingHelper(scene, this.getCamera, container, this.raycaster);
 	}
 
 	public enable() {
@@ -67,8 +83,13 @@ export class CircleTool {
 		this.enabled = true;
 		this.container.style.cursor = "crosshair";
 
-		this.container.addEventListener("pointermove", this.onPointerMove, { capture: true });
-		this.container.addEventListener("pointerdown", this.onPointerDown, { capture: true });
+		// Disable camera zoom when tool is active
+		if (this.setCameraZoom) {
+			this.setCameraZoom(false);
+		}
+
+		this.container.addEventListener("pointermove", this.onPointerMove);
+		this.container.addEventListener("pointerdown", this.onPointerDown);
 		window.addEventListener("keydown", this.onKeyDown);
 	}
 
@@ -77,19 +98,28 @@ export class CircleTool {
 		this.enabled = false;
 		this.container.style.cursor = "default";
 
-		this.container.removeEventListener("pointermove", this.onPointerMove, { capture: true });
-		this.container.removeEventListener("pointerdown", this.onPointerDown, { capture: true });
+		// Re-enable camera zoom when tool is disabled
+		if (this.setCameraZoom) {
+			this.setCameraZoom(true);
+		}
+
+		this.container.removeEventListener("pointermove", this.onPointerMove);
+		this.container.removeEventListener("pointerdown", this.onPointerDown);
 		window.removeEventListener("keydown", this.onKeyDown);
 
 		this.cleanup();
 	}
 
 	private onPointerDown = (event: PointerEvent) => {
+		// Allow right-click and middle-click to pass through for camera controls
 		if (!this.enabled || event.button !== 0) return;
 
-		const hit = this.raycast(event);
+		const snapResult = this.getSnappedPoint(event);
+		const hit = snapResult ? snapResult.point : null;
+
 		if (!hit) return;
 
+		// Only block left-click events for the tool
 		event.preventDefault();
 		event.stopPropagation();
 
@@ -100,14 +130,35 @@ export class CircleTool {
 			return;
 		}
 
+		// Update one last time to ensure precision
+		if (this.anchor) {
+			const radius = this.anchor.distanceTo(hit);
+			this.updatePreview(this.anchor, radius);
+		}
+
 		this.finalize();
 	};
 
 	private onPointerMove = (event: PointerEvent) => {
-		if (!this.enabled || !this.isDrawing || !this.anchor) return;
+		if (!this.enabled) return;
 
-		const hit = this.raycast(event);
-		if (!hit) return;
+		// Allow camera controls: skip processing if right/middle buttons are pressed
+		// event.buttons: 1=left, 2=right, 4=middle
+		if (event.buttons === 2 || event.buttons === 4 || event.buttons === 6) return;
+
+		const snapResult = this.getSnappedPoint(event);
+		const hit = snapResult ? snapResult.point : null;
+
+		if (!hit) {
+			if (this.connectorDot) this.connectorDot.visible = false;
+			this.intersectionGuide.update(null);
+			return;
+		}
+
+		// Update Connector Dot
+		this.updateConnectorDot(hit, snapResult?.kind);
+
+		if (!this.isDrawing || !this.anchor) return;
 
 		event.preventDefault();
 		event.stopPropagation();
@@ -118,12 +169,38 @@ export class CircleTool {
 		if (this.dimOverlay) this.dimOverlay.placeholder = `R: ${radius.toFixed(2)}m`;
 	};
 
+	private updateConnectorDot(pos: THREE.Vector3, snapKind?: string) {
+		if (!this.connectorDot) {
+			const canvas = document.createElement("canvas");
+			canvas.width = 64; canvas.height = 64;
+			const ctx = canvas.getContext("2d")!;
+			ctx.beginPath(); ctx.arc(32, 32, 16, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
+			ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.stroke();
+
+			const tex = new THREE.CanvasTexture(canvas);
+			const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+			this.connectorDot = new THREE.Sprite(mat);
+			this.connectorDot.scale.set(0.5, 0.5, 1);
+			this.connectorDot.renderOrder = 9999;
+			this.connectorDot.userData.isHelper = true;
+			this.scene.add(this.connectorDot);
+		}
+
+		this.connectorDot.visible = true;
+		this.connectorDot.position.copy(pos);
+		const mat = this.connectorDot.material;
+
+		if (snapKind === "endpoint") mat.color.setHex(0x00ff00);
+		else if (snapKind === "midpoint") mat.color.setHex(0x00ffff);
+		else mat.color.setHex(0xffffff);
+	}
+
 	private onKeyDown = (event: KeyboardEvent) => {
 		if (!this.enabled) return;
 		if (event.key === "Escape") this.cancel();
 	};
 
-	private raycast(event: PointerEvent): THREE.Vector3 | null {
+	private getSnappedPoint(event: PointerEvent): { point: THREE.Vector3, kind?: string } | null {
 		const rect = this.container.getBoundingClientRect();
 		this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
 		this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -133,9 +210,36 @@ export class CircleTool {
 		const groundY = this.getGroundY();
 		this.planeXZ.constant = -(groundY + SURFACE_OFFSET);
 
-		const hit = new THREE.Vector3();
-		if (this.raycaster.ray.intersectPlane(this.planeXZ, hit)) return hit;
-		return null;
+		const rawHit = new THREE.Vector3();
+		if (!this.raycaster.ray.intersectPlane(this.planeXZ, rawHit)) return null;
+
+		// 1. Snapping
+		const currentPoints = this.anchor ? [this.anchor] : [];
+		const snap = this.snappingHelper.getBestSnapByScreen(
+			new THREE.Vector2(event.clientX, event.clientY),
+			currentPoints,
+			15
+		);
+
+		// 2. Intersection (only if drawing)
+		let intersectResult = null;
+		if (this.isDrawing && this.anchor) {
+			const candidates = this.snappingHelper.getSceneVertices({ limit: 200 });
+
+			intersectResult = this.intersectionHelper.getBestIntersection(
+				this.anchor,
+				candidates,
+				new THREE.Vector2(event.clientX, event.clientY),
+				15
+			);
+		}
+
+		this.intersectionGuide.update(intersectResult);
+
+		if (snap) return { point: snap.point, kind: snap.kind };
+		if (intersectResult) return { point: intersectResult.point, kind: 'intersection' };
+
+		return { point: rawHit };
 	}
 
 	private getGroundY() {
@@ -240,6 +344,12 @@ export class CircleTool {
 		if (this.dimOverlay) {
 			this.dimOverlay.remove();
 			this.dimOverlay = null;
+		}
+
+		this.intersectionGuide.update(null);
+
+		if (this.connectorDot) {
+			this.connectorDot.visible = false;
 		}
 	}
 

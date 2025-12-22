@@ -2,6 +2,7 @@ import * as THREE from "three";
 import pc from "polygon-clipping";
 // import { fallbackMapIFC } from "@/components/custom/SceneCanvas/utils/objectFactory";
 import { disposeObjectDeep } from "../utils/threeHelpers";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 // --------------------------------------------------------
 // Basic types (2D di plane XZ / polygon-clipping style)
@@ -314,10 +315,22 @@ export function addEdgeWireToMesh(mesh: THREE.Mesh) {
       (existing.geometry as any)?.dispose?.();
       (existing.material as any)?.dispose?.();
     }
-    const edges = new THREE.EdgesGeometry(
-      mesh.geometry as THREE.BufferGeometry,
-      1
-    );
+    const baseGeometry = mesh.geometry as THREE.BufferGeometry;
+    const position = baseGeometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+
+    let edges: THREE.EdgesGeometry;
+    if (position) {
+      const temp = new THREE.BufferGeometry();
+      temp.setAttribute("position", position);
+      if (baseGeometry.index) temp.setIndex(baseGeometry.index);
+
+      const welded = mergeVertices(temp, 1e-4);
+      temp.dispose();
+      edges = new THREE.EdgesGeometry(welded, 25);
+      welded.dispose();
+    } else {
+      edges = new THREE.EdgesGeometry(baseGeometry, 25);
+    }
     const mat = new THREE.LineBasicMaterial({
       color: 0x1f1f1f,
       depthTest: false,

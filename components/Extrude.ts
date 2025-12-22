@@ -31,11 +31,13 @@ type ActiveExtrudeState = {
   lastHollow: boolean;
   axisVector: THREE.Vector3;
   extrudeNormalWorld: THREE.Vector3;
+  basePlaneWorld: THREE.Plane;
   dragPlane: THREE.Plane;
   startPlanePoint: THREE.Vector3; // World point where drag started
   faceCenter: THREE.Vector3; // Approximate center of the face being extruded
   pointerId: number;
   previousControlsEnabled: boolean | null;
+  hiddenHelpers: Array<{ obj: THREE.Object3D; visible: boolean }>;
   // New Pull Mode State
   mode: 'normal' | 'pull';
   pullKind?: 'rect' | 'circle' | 'poly';
@@ -276,6 +278,16 @@ export class ExtrudeTool {
         center = { x: meta.center[0], z: meta.center[1] };
         radius = meta.radius;
         if (pullDir !== 'depth') pullDir = 'radius'; // Override for circle logic if side clicked
+
+        if (pullDir === 'radius') {
+          const centerWorld = new THREE.Vector3(center.x, hit.point.y, center.z);
+          const radialOut = hit.point.clone().sub(centerWorld).projectOnPlane(extrudeNormalWorld);
+          const radialSign =
+            radialOut.lengthSq() > 1e-10
+              ? Math.sign(axisVector.clone().normalize().dot(radialOut.normalize())) || 1
+              : 1;
+          dragSign = radialSign;
+        }
       } else if (pullKind === 'poly') {
         vertices = meta.vertices.map((p: any) => ({ x: p[0], z: p[1] }));
         pullDir = 'depth'; // Poly only supports height pull for now
@@ -303,6 +315,26 @@ export class ExtrudeTool {
     const dragPlane = this.computeDragPlane(axisVector, hit.point.clone());
     if (!dragPlane) return;
 
+    const hiddenHelpers: ActiveExtrudeState["hiddenHelpers"] = [];
+    selectedMesh.traverse((child) => {
+      if (child === selectedMesh) return;
+      const isHelper = (child.userData as any)?.isHelper === true || child.name === "__edgeWire";
+      if (!isHelper) return;
+      hiddenHelpers.push({ obj: child, visible: child.visible });
+      child.visible = false;
+    });
+
+    const basePlaneWorld = new THREE.Plane();
+    {
+      const geom = selectedMesh.geometry as THREE.BufferGeometry | undefined;
+      if (geom && !geom.boundingBox) geom.computeBoundingBox();
+      const bbox = geom?.boundingBox ?? null;
+      const anchorYLocal = bbox ? (startDepth >= 0 ? bbox.min.y : bbox.max.y) : 0;
+      const anchorPointWorld = new THREE.Vector3(0, anchorYLocal, 0);
+      selectedMesh.localToWorld(anchorPointWorld);
+      basePlaneWorld.setFromNormalAndCoplanarPoint(extrudeNormalWorld.clone(), anchorPointWorld);
+    }
+
     this.active = {
       mesh: selectedMesh,
       shape: shape.clone(),
@@ -312,11 +344,13 @@ export class ExtrudeTool {
       lastHollow: mode === "pull" ? startDepth < 0 : false,
       axisVector,
       extrudeNormalWorld: extrudeNormalWorld.clone(),
+      basePlaneWorld,
       dragPlane,
       startPlanePoint: hit.point.clone(),
       faceCenter,
       pointerId: event.pointerId,
       previousControlsEnabled,
+      hiddenHelpers,
       mode,
       pullKind,
       pullState
@@ -415,35 +449,8 @@ export class ExtrudeTool {
         }
 
         const startW = (state as any).startWidth;
-        const startC = (state as any).startCenter;
-
-        const currentW = Math.max(0.1, startW + delta);
-        const expansion = currentW - startW;
-
-        // Shift center: aligned with axisVector
-        // Center move = axisVector * (expansion / 2)
-        // We need to map axisVector (World) to Top-Down 2D shift (x, z).
-        // axisVector is predominantly X or Z.
-
-        // Convert axis to flat XZ vector
-        // We know Face Normal (axisVector) corresponds to X or Z local.
-        // If local X -> World direction?
-        // We need the world shift.
-        const shiftWorld = this.active.axisVector.clone().multiplyScalar(expansion / 2);
-
-        // mesh is Extruded. Center is relative to what? 
-        // state.center is (x, z) on the floor plane.
-        // We need to apply shiftWorld to state.center... but state.center is Local Floor coords? 
-        // Or World?
-        // polygon-clipper says `meta.center` is World XZ (usually).
-        // Yes: `const [cx, cz] = meta.center`.
-        // So we simply add shiftWorld.x and shiftWorld.z to startC.
-
+        const currentW = Math.max(0.1, startW + delta * 2);
         state.width = currentW;
-        state.center = {
-          x: startC.x + shiftWorld.x,
-          z: startC.z + shiftWorld.z
-        };
 
         this.updatePullGeometry(this.active.mesh, this.active.lastDepth, this.active.pullKind!, state, this.active.lastHollow); // Use constant depth
         state.inputEl.value = currentW.toFixed(3);
@@ -452,24 +459,24 @@ export class ExtrudeTool {
         if ((state as any).startLength == null) {
           (state as any).startWidth = state.width;
           (state as any).startLength = state.length;
-          (state as any).startCenter = { ...state.center };
         }
         const startL = (state as any).startLength;
-        const startC = (state as any).startCenter;
-
-        const currentL = Math.max(0.1, startL + delta);
-        const expansion = currentL - startL;
-
-        const shiftWorld = this.active.axisVector.clone().multiplyScalar(expansion / 2);
+        const currentL = Math.max(0.1, startL + delta * 2);
 
         state.length = currentL;
-        state.center = {
-          x: startC.x + shiftWorld.x,
-          z: startC.z + shiftWorld.z
-        };
 
         this.updatePullGeometry(this.active.mesh, this.active.lastDepth, this.active.pullKind!, state, this.active.lastHollow);
         state.inputEl.value = currentL.toFixed(3);
+      } else if (activeDir === 'radius' && state.radius != null) {
+        if ((state as any).startRadius == null) {
+          (state as any).startRadius = state.radius;
+        }
+        const startR = (state as any).startRadius;
+        const radiusSign = typeof state.dragSign === 'number' ? state.dragSign : 1;
+        const currentR = Math.max(0.01, startR + delta * radiusSign);
+        state.radius = currentR;
+        this.updatePullGeometry(this.active.mesh, this.active.lastDepth, this.active.pullKind!, state, this.active.lastHollow);
+        state.inputEl.value = currentR.toFixed(3);
       }
 
       return;
@@ -555,7 +562,25 @@ export class ExtrudeTool {
       ud.extrudeWallThickness = 0;
       ud.extrudeFloorThickness = 0;
       ud.extrudeExtraCut = 0.1;
-      ud.extrudeShape = state.shape;
+      let committedShape = state.shape;
+      if (state.mode === "pull" && state.pullKind && state.pullState) {
+        if (state.pullKind === "rect" && state.pullState.width != null && state.pullState.length != null) {
+          const s = new THREE.Shape();
+          const w = state.pullState.width;
+          const l = state.pullState.length;
+          s.moveTo(-w / 2, -l / 2);
+          s.lineTo(w / 2, -l / 2);
+          s.lineTo(w / 2, l / 2);
+          s.lineTo(-w / 2, l / 2);
+          s.lineTo(-w / 2, -l / 2);
+          committedShape = s;
+        } else if (state.pullKind === "circle" && state.pullState.radius != null) {
+          const s = new THREE.Shape();
+          s.absarc(0, 0, state.pullState.radius, 0, Math.PI * 2, false);
+          committedShape = s;
+        }
+      }
+      ud.extrudeShape = committedShape;
       ud.isExtruded = true;
 
       // Update surfaceMeta if we changed dimensions in Pull Mode
@@ -597,6 +622,14 @@ export class ExtrudeTool {
         } catch {
           // ignore
         }
+      }
+    }
+
+    for (const entry of state.hiddenHelpers) {
+      try {
+        entry.obj.visible = entry.visible;
+      } catch {
+        // ignore
       }
     }
   }
@@ -695,7 +728,7 @@ export class ExtrudeTool {
     (target.userData as any)._solidGeometry = solidLocal;
 
     // Create Display Geometry (Stripped Cap)
-    const openGeom = this.stripCapAtAxis(solidLocal.clone(), "y", 0, 1e-4);
+    const openGeom = this.stripCapAtAxis(solidLocal.clone(), "y", 0, 1e-3);
 
     // 4. Update Target
     const prevGeom = target.geometry;
@@ -726,7 +759,7 @@ export class ExtrudeTool {
     geometry: THREE.BufferGeometry,
     axis: "x" | "y" | "z",
     value = 0,
-    eps = 1e-5
+    eps = 1e-3
   ): THREE.BufferGeometry {
     const working = geometry.index ? geometry.toNonIndexed() : geometry;
     const pos = working.getAttribute("position") as THREE.BufferAttribute | undefined;
@@ -735,36 +768,63 @@ export class ExtrudeTool {
       return geometry;
     }
 
-    const normal = working.getAttribute("normal") as THREE.BufferAttribute | undefined;
     const uv = working.getAttribute("uv") as THREE.BufferAttribute | undefined;
 
     const positions: number[] = [];
-    const normals: number[] = [];
     const uvs: number[] = [];
 
-    const getAxis = (attr: THREE.BufferAttribute, idx: number) => {
-      if (axis === "x") return attr.getX(idx);
-      if (axis === "y") return attr.getY(idx);
-      return attr.getZ(idx);
-    };
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vC = new THREE.Vector3();
 
     for (let i = 0; i < pos.count; i += 3) {
-      const a0 = getAxis(pos, i);
-      const a1 = getAxis(pos, i + 1);
-      const a2 = getAxis(pos, i + 2);
+      let x0 = pos.getX(i); let y0 = pos.getY(i); let z0 = pos.getZ(i);
+      let x1 = pos.getX(i + 1); let y1 = pos.getY(i + 1); let z1 = pos.getZ(i + 1);
+      let x2 = pos.getX(i + 2); let y2 = pos.getY(i + 2); let z2 = pos.getZ(i + 2);
 
+      // Snap to plane
+      if (axis === 'x') {
+        if (Math.abs(x0 - value) <= eps) x0 = value;
+        if (Math.abs(x1 - value) <= eps) x1 = value;
+        if (Math.abs(x2 - value) <= eps) x2 = value;
+      } else if (axis === 'y') {
+        if (Math.abs(y0 - value) <= eps) y0 = value;
+        if (Math.abs(y1 - value) <= eps) y1 = value;
+        if (Math.abs(y2 - value) <= eps) y2 = value;
+      } else {
+        if (Math.abs(z0 - value) <= eps) z0 = value;
+        if (Math.abs(z1 - value) <= eps) z1 = value;
+        if (Math.abs(z2 - value) <= eps) z2 = value;
+      }
+
+      const a0 = axis === 'x' ? x0 : (axis === 'y' ? y0 : z0);
+      const a1 = axis === 'x' ? x1 : (axis === 'y' ? y1 : z1);
+      const a2 = axis === 'x' ? x2 : (axis === 'y' ? y2 : z2);
+
+      // Strict check after snap
       const isCap =
-        Math.abs(a0 - value) <= eps &&
-        Math.abs(a1 - value) <= eps &&
-        Math.abs(a2 - value) <= eps;
+        Math.abs(a0 - value) < 1e-6 &&
+        Math.abs(a1 - value) < 1e-6 &&
+        Math.abs(a2 - value) < 1e-6;
 
       if (isCap) continue;
 
-      for (let j = 0; j < 3; j++) {
-        const idx = i + j;
-        positions.push(pos.getX(idx), pos.getY(idx), pos.getZ(idx));
-        if (normal) normals.push(normal.getX(idx), normal.getY(idx), normal.getZ(idx));
-        if (uv) uvs.push(uv.getX(idx), uv.getY(idx));
+      // Degenerate check
+      vA.set(x0, y0, z0);
+      vB.set(x1, y1, z1);
+      vC.set(x2, y2, z2);
+      vB.sub(vA);
+      vC.sub(vA);
+      vB.cross(vC);
+      if (vB.lengthSq() < 1e-12) continue;
+
+      positions.push(x0, y0, z0, x1, y1, z1, x2, y2, z2);
+      if (uv) {
+        uvs.push(
+          uv.getX(i), uv.getY(i),
+          uv.getX(i + 1), uv.getY(i + 1),
+          uv.getX(i + 2), uv.getY(i + 2)
+        );
       }
     }
 
@@ -774,22 +834,18 @@ export class ExtrudeTool {
     const stripped = new THREE.BufferGeometry();
     stripped.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
 
-    if (normals.length > 0) {
-      stripped.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    } else {
-      stripped.computeVertexNormals();
-    }
-
     if (uvs.length > 0) {
       stripped.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
     }
 
-    stripped.computeBoundingBox();
-    stripped.computeBoundingSphere();
-    return stripped;
+    const merged = mergeVertices(stripped, 1e-3);
+    merged.computeVertexNormals();
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+    return merged;
   }
 
-  private stripCapAtZ(geometry: THREE.BufferGeometry, z = 0, eps = 1e-5): THREE.BufferGeometry {
+  private stripCapAtZ(geometry: THREE.BufferGeometry, z = 0, eps = 1e-3): THREE.BufferGeometry {
     return this.stripCapAtAxis(geometry, "z", z, eps);
   }
   private cancelActiveExtrude() {
@@ -971,12 +1027,12 @@ export class ExtrudeTool {
       const temp = new THREE.BufferGeometry();
       temp.setAttribute("position", position);
       if (baseGeometry.index) temp.setIndex(baseGeometry.index);
-      const welded = mergeVertices(temp, 1e-4);
+      const welded = mergeVertices(temp, 1e-3);
       temp.dispose();
-      edges = new THREE.EdgesGeometry(welded, 25);
+      edges = new THREE.EdgesGeometry(welded, 45);
       welded.dispose();
     } else {
-      edges = new THREE.EdgesGeometry(mesh.geometry, 25);
+      edges = new THREE.EdgesGeometry(mesh.geometry, 45);
     }
     const mat = new THREE.LineBasicMaterial({
       color: 0x1f1f1f,
@@ -1032,11 +1088,8 @@ export class ExtrudeTool {
     } else if (kind === 'circle' && state.radius != null) {
       shape = new THREE.Shape();
       shape.absarc(0, 0, state.radius, 0, Math.PI * 2, false);
-    } else if (kind === 'poly' && state.vertices && state.vertices.length > 0) {
-      // Use absolute coordinates, mapping z -> -y for shape
-      shape = new THREE.Shape(state.vertices.map((v: any) =>
-        new THREE.Vector2(v.x, -(v.z ?? v.y))
-      ));
+    } else if (kind === 'poly') {
+      shape = this.active.shape.clone();
     }
 
     if (!shape) return;
@@ -1067,11 +1120,8 @@ export class ExtrudeTool {
     // For Rect/Circle, we constructed centered shape, so we translate to center.
     // For Poly, we used absolute coordinates, so NO translation needed.
     if ((kind === 'rect' || kind === 'circle') && state.center) {
-      const offset = new THREE.Vector3(
-        state.center.x,
-        this.active.startPlanePoint.y,
-        state.center.z
-      );
+      const offset = new THREE.Vector3(state.center.x, 0, state.center.z);
+      this.active.basePlaneWorld.projectPoint(offset, offset);
       try {
         mesh.worldToLocal(offset);
       } catch {

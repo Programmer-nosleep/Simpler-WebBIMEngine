@@ -115,17 +115,20 @@ const init = async () => {
 	const rectangleTool = new RectangleTool(
 		cameraScene.scene,
 		getCamera,
-		container
+		container,
+		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
 	);
 	const circleTool = new CircleTool(
 		cameraScene.scene,
 		getCamera,
-		container
+		container,
+		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
 	);
 	const polygonTool = new PolygonTool(
 		cameraScene.scene,
 		getCamera,
-		container
+		container,
+		{ setCameraZoom: (enabled) => cameraScene.setZoomEnabled(enabled) }
 	);
 	const moveTool = new MoveTool(
 		cameraScene.scene,

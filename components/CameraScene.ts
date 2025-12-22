@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+import CameraControls from "camera-controls";
 
 export type CameraProjectionMode = "Perspective" | "Orthographic";
 
@@ -26,6 +27,7 @@ export type CameraSceneApi = {
   setNavigationMode: (mode: OBC.NavModeID) => void;
   getNavigationMode: () => OBC.NavModeID;
   onNavigationModeChanged: (handler: (mode: OBC.NavModeID) => void) => () => void;
+  setZoomEnabled: (enabled: boolean) => void;
   dispose: () => void;
 };
 
@@ -127,6 +129,17 @@ export async function createCameraScene(
       navigationHandlers.add(handler);
       handler(getNavigationMode());
       return () => navigationHandlers.delete(handler);
+    },
+    setZoomEnabled: (enabled) => {
+      if (world.camera.controls) {
+        if (enabled) {
+          // Re-enable dolly (zoom) on scroll
+          world.camera.controls.mouseButtons.wheel = (CameraControls as any).ACTION.DOLLY;
+        } else {
+          // Disable dolly (zoom) on scroll
+          world.camera.controls.mouseButtons.wheel = (CameraControls as any).ACTION.NONE;
+        }
+      }
     },
     dispose: () => {
       components.dispose();

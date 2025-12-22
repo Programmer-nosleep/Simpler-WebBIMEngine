@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { ADDITION, Brush, Evaluator, SUBTRACTION } from "three-bvh-csg";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 export type HollowExtrusionOptions = {
   wallThickness?: number;
@@ -295,7 +296,9 @@ export function mergeHollowExtrusionsToTargetLocal(
 
   const resultBrush = evaluator.evaluate(outerAcc, voidAcc, SUBTRACTION);
 
-  const result = (resultBrush.geometry as THREE.BufferGeometry).clone();
+  let result = (resultBrush.geometry as THREE.BufferGeometry).clone();
+  result.deleteAttribute('normal');
+  result = mergeVertices(result, 1e-3);
   result.computeVertexNormals();
   result.computeBoundingBox();
   result.computeBoundingSphere();
@@ -388,7 +391,9 @@ export function buildHollowExtrusionGeometry(
   evaluator.useGroups = false;
   const resultBrush = evaluator.evaluate(baseBrush, voidBrush, SUBTRACTION);
 
-  const result = (resultBrush.geometry as THREE.BufferGeometry).clone();
+  let result = (resultBrush.geometry as THREE.BufferGeometry).clone();
+  result.deleteAttribute('normal');
+  result = mergeVertices(result, 1e-3);
   result.translate(baseInfo.center.x, baseInfo.center.y, 0);
   result.computeVertexNormals();
   result.computeBoundingBox();
