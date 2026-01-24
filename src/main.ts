@@ -237,7 +237,6 @@ const init = async () => {
 		rectangleTool,
 		circleTool,
 		arcTool,
-
 		polygonTool,
 		moveTool,
 		extrudeTool,
@@ -986,7 +985,10 @@ const setupDockSystem = async (
 	updateSelectionState("select");
 
 	cameraScene.onNavigationModeChanged((mode: string) => {
-		if (mode === "Plan" && selectionSystem.currentTool !== "hand") {
+		// Plan mode shouldn't forcibly override drawing tools (e.g. Line).
+		const tool = selectionSystem.currentTool as DockToolId | string | null;
+		const allowInPlan = new Set<DockToolId>(["hand", "line", "rectangle", "circle", "arc", "polygon"]);
+		if (mode === "Plan" && (!tool || !allowInPlan.has(tool as DockToolId))) {
 			dock.setActiveTool("hand", { silent: true });
 			updateSelectionState("hand");
 		}

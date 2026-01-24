@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import * as pc from "polygon-clipping";
+import pc from "polygon-clipping";
 // import { fallbackMapIFC } from "@/components/custom/SceneCanvas/utils/objectFactory";
 import { disposeObjectDeep } from "../utils/threeHelpers";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
@@ -55,6 +55,35 @@ export const ensureClosedRing = (ring: Ring2D | null | undefined): Ring2D => {
     normalized.push([first[0], first[1]]);
   }
   return normalized;
+};
+
+// Parse various vertex formats into a Ring2D ([x,z] tuples).
+const parseRing2D = (vertices: unknown): Ring2D => {
+  if (!Array.isArray(vertices)) return [];
+  const ring: Ring2D = [];
+  for (const v of vertices as any[]) {
+    if (Array.isArray(v)) {
+      const x = Number(v[0]);
+      const z = Number(v.length >= 3 ? v[2] : v[1]);
+      if (Number.isFinite(x) && Number.isFinite(z)) ring.push([x, z]);
+      continue;
+    }
+
+    const x = Number((v as any)?.x ?? (v as any)?.[0]);
+    const z = Number((v as any)?.z ?? (v as any)?.y ?? (v as any)?.[2] ?? (v as any)?.[1]);
+    if (Number.isFinite(x) && Number.isFinite(z)) ring.push([x, z]);
+  }
+  return ring;
+};
+
+const parseHoles2D = (holes: unknown): Ring2D[] => {
+  if (!Array.isArray(holes)) return [];
+  const result: Ring2D[] = [];
+  for (const h of holes as any[]) {
+    const ring = parseRing2D(h);
+    if (ring.length >= 3) result.push(ring);
+  }
+  return result;
 };
 
 const cleanRingForGeometry = (ring: Ring2D): Ring2D => {
@@ -142,11 +171,14 @@ function meshSurfaceToPoly2D(mesh: THREE.Mesh): MultiPoly | null {
 
   // 0) Kalau sudah punya polyVertices di userData, pakai itu dulu (ini paling aman)
   if (Array.isArray(ud.polyVertices) && ud.polyVertices.length >= 3) {
-    const ring: Ring2D = ud.polyVertices.map((v: any) => [
-      Number(v.x),
-      Number(v.z),
-    ]);
-    return [[ensureClosedRing(ring)]];
+    const outer = ensureClosedRing(parseRing2D(ud.polyVertices));
+    if (outer.length < 4) return null;
+
+    const holes = parseHoles2D(meta.holes ?? ud.polyHoles)
+      .map(ensureClosedRing)
+      .filter((ring) => ring.length >= 4);
+
+    return [[outer, ...holes]];
   }
 
   // 1) Pakai surfaceMeta dulu SEBELUM baca dari geometry
@@ -173,14 +205,14 @@ function meshSurfaceToPoly2D(mesh: THREE.Mesh): MultiPoly | null {
 
   // POLY dari meta.vertices
   if (meta.kind === "poly" && Array.isArray(meta.vertices)) {
-    const ring: Ring2D = meta.vertices.map((v: any) => {
-      if (Array.isArray(v)) return [Number(v[0]), Number(v[1])] as [number, number];
-      const x = Number(v.x ?? v[0]);
-      const z = Number(v.z ?? v.y ?? v[1]);
-      return [x, z];
-    });
-    if (ring.length < 3) return null;
-    return [[ensureClosedRing(ring)]];
+    const outerRing = parseRing2D(meta.vertices);
+    if (outerRing.length < 3) return null;
+
+    const holes = parseHoles2D(meta.holes ?? ud.polyHoles)
+      .map(ensureClosedRing)
+      .filter((ring) => ring.length >= 4);
+
+    return [[ensureClosedRing(outerRing), ...holes]];
   }
 
   // CIRCLE: approx jadi n-gon
@@ -255,33 +287,15 @@ function meshToPolygon2D(mesh: THREE.Mesh): Poly2 | null {
 
   // ------------------ POLY ------------------
   if (kind === "poly") {
-    const verts: any[] = meta.vertices || ud.vertices || [];
-    if (!Array.isArray(verts) || verts.length < 3) return null;
+    const outerRaw = meta.vertices ?? ud.vertices;
+    const outerRing = parseRing2D(outerRaw);
+    if (outerRing.length < 3) return null;
 
-    const ring: Ring2 = [];
-    for (const v of verts) {
-      let x: number | undefined;
-      let z: number | undefined;
-      if (Array.isArray(v)) {
-        x = Number(v[0]);
-        z = Number(v[2] ?? v[1]);
-      } else if (v && typeof v === "object") {
-        x = Number(v.x ?? v[0]);
-        z = Number(v.z ?? v[1]);
-      }
-      if (Number.isFinite(x) && Number.isFinite(z)) {
-        ring.push([snap(x!), snap(z!)]);
-      }
-    }
-    if (ring.length < 3) return null;
+    const holes = parseHoles2D(meta.holes ?? ud.polyHoles ?? ud.holes)
+      .map(ensureClosedRing)
+      .filter((ring) => ring.length >= 4);
 
-    // pastikan tertutup
-    const [x0, z0] = ring[0];
-    const [xN, zN] = ring[ring.length - 1];
-    if (Math.abs(x0 - xN) > 1e-6 || Math.abs(z0 - zN) > 1e-6) {
-      ring.push([x0, z0]);
-    }
-    return [ring];
+    return [ensureClosedRing(outerRing), ...holes];
   }
 
   // ------------------ Fallback: bounding box (WORLD) ------------------
@@ -423,6 +437,96 @@ function buildFloorMeshFromRing(
     vertices: storedRing,
   };
   mesh.userData.polyVertices = storedRing.map(([x, z]) => ({ x, z }));
+  mesh.userData.depth = opts.depth ?? 0;
+
+  return mesh;
+}
+
+function buildFloorMeshFromPoly(
+  poly: Poly2,
+  opts: {
+    depth: number;
+    planeY?: number;
+    fillColor?: number;
+    fillOpacity?: number;
+  }
+): THREE.Mesh | null {
+  if (!poly.length || !poly[0] || poly[0].length < 3) return null;
+
+  const outer = cleanRingForGeometry(poly[0]);
+  if (outer.length < 3) return null;
+
+  const shape = new THREE.Shape(outer.map(([x, z]) => new THREE.Vector2(x, -z)));
+
+  for (const hole of poly.slice(1)) {
+    const holeRing = cleanRingForGeometry(hole);
+    if (holeRing.length < 3) continue;
+    const holePath = new THREE.Path(holeRing.map(([x, z]) => new THREE.Vector2(x, -z)));
+    shape.holes.push(holePath);
+  }
+
+  let geom: THREE.BufferGeometry;
+  if (opts.depth && opts.depth > 0) {
+    geom = new THREE.ExtrudeGeometry(shape, {
+      depth: opts.depth,
+      bevelEnabled: false,
+    });
+  } else {
+    geom = new THREE.ShapeGeometry(shape);
+  }
+
+  // Ground XZ → rotate ke Y-up
+  geom.rotateX(-Math.PI / 2);
+
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox;
+  if (bb) {
+    const offsetY = -bb.min.y;
+    geom.translate(0, offsetY, 0);
+  }
+
+  const opacity = Number.isFinite(opts.fillOpacity)
+    ? THREE.MathUtils.clamp(Number(opts.fillOpacity), 0, 1)
+    : 1;
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: opts.fillColor ?? 0xffffff,
+    transparent: opacity < 1,
+    opacity,
+    side: THREE.DoubleSide,
+  });
+
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.y = Number.isFinite(opts.planeY) ? Number(opts.planeY) : SURFACE_OFFSET;
+
+  // Hitung center & simpan meta poly (outer + holes)
+  const bbox = new THREE.Box3().setFromObject(mesh);
+  const cx = (bbox.min.x + bbox.max.x) / 2;
+  const cz = (bbox.min.z + bbox.max.z) / 2;
+
+  const storedOuter = ensureClosedRing(poly[0]);
+  const storedHoles = poly
+    .slice(1)
+    .map(ensureClosedRing)
+    .filter((ring) => ring.length >= 4);
+
+  mesh.userData.type = "surface";
+  mesh.userData.mode = "poly";
+  mesh.userData.label = "Polygon";
+  mesh.userData.category = "Plane/Sketch";
+  mesh.userData.QreaseeCategory = "Floor";
+  mesh.userData.selectable = true;
+  mesh.userData.locked = false;
+  mesh.userData.surfaceMeta = {
+    kind: "poly",
+    center: [cx, cz],
+    vertices: storedOuter,
+    ...(storedHoles.length ? { holes: storedHoles } : {}),
+  };
+  mesh.userData.polyVertices = storedOuter.map(([x, z]) => ({ x, z }));
+  if (storedHoles.length) {
+    mesh.userData.polyHoles = storedHoles.map((ring) => ring.map(([x, z]) => ({ x, z })));
+  }
   mesh.userData.depth = opts.depth ?? 0;
 
   return mesh;
@@ -589,16 +693,26 @@ export function splitFloorsWithNewRect(
   for (const region of regions) {
     for (const poly of region.poly) {
       if (!poly.length || !poly[0] || poly[0].length < 3) continue;
-      const ring = poly[0]; // ignore holes untuk sekarang
-      const mesh = buildFloorMeshFromRing(ring, {
-        depth: region.depth,
-        planeY: planeYTarget,
-        fillColor: opts.fillColor,
-        fillOpacity: opts.fillOpacity,
-      });
+      const mesh =
+        poly.length > 1
+          ? buildFloorMeshFromPoly(poly, {
+              depth: region.depth,
+              planeY: planeYTarget,
+              fillColor: opts.fillColor,
+              fillOpacity: opts.fillOpacity,
+            })
+          : buildFloorMeshFromRing(poly[0], {
+              depth: region.depth,
+              planeY: planeYTarget,
+              fillColor: opts.fillColor,
+              fillOpacity: opts.fillOpacity,
+            });
+      if (!mesh) continue;
       scene.add(mesh);
       created.push(mesh);
-       addOutlineFromRing(mesh, ring);
+      for (const ring of poly) {
+        addOutlineFromRing(mesh, ring);
+      }
     }
   }
 

@@ -41,6 +41,8 @@ type ActiveExtrudeState = {
   // New Pull Mode State
   mode: 'normal' | 'pull';
   pullKind?: 'rect' | 'circle' | 'poly';
+  // Single-click mode: track if initial pointerup happened
+  initialPointerUpDone?: boolean;
   pullState?: {
     center?: { x: number; z: number };
     width?: number;
@@ -74,6 +76,117 @@ export class ExtrudeTool {
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
   private active: ActiveExtrudeState | null = null;
+
+  private getKindFromMesh(mesh: THREE.Mesh): 'rect' | 'circle' | 'poly' | null {
+    const ud: any = mesh.userData || {};
+    const meta = ud.surfaceMeta || {};
+    const kind = meta.kind ?? ud.mode ?? ud.kind;
+    if (kind === 'rect') return 'rect';
+    if (kind === 'circle') return 'circle';
+    if (kind === 'poly') return 'poly';
+    return null;
+  }
+
+  private isExtrudableMesh(mesh: THREE.Mesh): boolean {
+    if (!mesh || !(mesh as any).isMesh) return false;
+    if ((mesh.userData as any)?.isHelper) return false;
+
+    // Already-extruded meshes (or meshes created from Shape/ExtrudeGeometry) carry the shape.
+    if (this.getShapeFromMesh(mesh)) return true;
+
+    // Surfaces created by Rectangle/Circle/Polygon tools store dimensions in `userData.surfaceMeta`.
+    const kind = this.getKindFromMesh(mesh);
+    const ud: any = mesh.userData || {};
+    const meta = ud.surfaceMeta || {};
+
+    if (kind === 'rect') {
+      const w = Number(meta.width);
+      const l = Number(meta.length);
+      return Number.isFinite(w) && Number.isFinite(l) && w > 0 && l > 0;
+    }
+
+    if (kind === 'circle') {
+      const r = Number(meta.radius);
+      return Number.isFinite(r) && r > 0;
+    }
+
+    if (kind === 'poly') {
+      return Array.isArray(meta.vertices) && meta.vertices.length >= 3;
+    }
+
+    return false;
+  }
+
+  private buildShapeFromSurfaceMeta(
+    mesh: THREE.Mesh,
+    kind: 'rect' | 'circle' | 'poly',
+    state?: { center?: { x: number; z: number }; width?: number; length?: number; radius?: number; vertices?: Array<{ x: number; z: number }> }
+  ): THREE.Shape | null {
+    const ud: any = mesh.userData || {};
+    const meta = ud.surfaceMeta || {};
+
+    if (kind === 'rect') {
+      const w = state?.width ?? Number(meta.width);
+      const l = state?.length ?? Number(meta.length);
+      if (!Number.isFinite(w) || !Number.isFinite(l) || w <= 0 || l <= 0) return null;
+      const s = new THREE.Shape();
+      s.moveTo(-w / 2, -l / 2);
+      s.lineTo(w / 2, -l / 2);
+      s.lineTo(w / 2, l / 2);
+      s.lineTo(-w / 2, l / 2);
+      s.closePath();
+      return s;
+    }
+
+    if (kind === 'circle') {
+      const r = state?.radius ?? Number(meta.radius);
+      if (!Number.isFinite(r) || r <= 0) return null;
+      const s = new THREE.Shape();
+      s.absarc(0, 0, r, 0, Math.PI * 2, false);
+      return s;
+    }
+
+    // Poly: build from world-space ring vertices, centered around `state.center` (or meta.center).
+    const rawVertices: Array<{ x: number; z: number }> =
+      state?.vertices ??
+      (Array.isArray(meta.vertices)
+        ? meta.vertices.map((p: any) =>
+            Array.isArray(p)
+              ? { x: Number(p[0]) || 0, z: Number(p[1]) || 0 }
+              : { x: Number(p.x) || 0, z: Number(p.z ?? p.y) || 0 }
+          )
+        : []);
+
+    if (!rawVertices || rawVertices.length < 3) return null;
+
+    let cx = state?.center?.x;
+    let cz = state?.center?.z;
+    if (!Number.isFinite(cx) || !Number.isFinite(cz)) {
+      const cArr = meta.center;
+      if (Array.isArray(cArr) && cArr.length >= 2) {
+        cx = Number(cArr[0]);
+        cz = Number(cArr[1]);
+      }
+    }
+    if (!Number.isFinite(cx) || !Number.isFinite(cz)) {
+      // Fallback: bbox center of vertices.
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const v of rawVertices) {
+        if (v.x < minX) minX = v.x;
+        if (v.x > maxX) maxX = v.x;
+        if (v.z < minZ) minZ = v.z;
+        if (v.z > maxZ) maxZ = v.z;
+      }
+      cx = (minX + maxX) / 2;
+      cz = (minZ + maxZ) / 2;
+    }
+
+    const pts = rawVertices.map((v) => new THREE.Vector2(v.x - (cx as number), -(v.z - (cz as number))));
+    const s = new THREE.Shape();
+    s.setFromPoints(pts);
+    s.closePath();
+    return s;
+  }
 
   constructor(
     camera: THREE.Camera | (() => THREE.Camera),
@@ -356,7 +469,11 @@ export class ExtrudeTool {
       }
 
     } else if (pullKind === 'poly') {
-      center = { x: bboxCenter.x, z: bboxCenter.z };
+      if (meta?.center && Array.isArray(meta.center) && meta.center.length >= 2) {
+        center = { x: meta.center[0], z: meta.center[1] };
+      } else {
+        center = { x: bboxCenter.x, z: bboxCenter.z };
+      }
       width = startWidth;
       length = startLength;
 
@@ -455,26 +572,15 @@ export class ExtrudeTool {
     }
 
     // Get or create shape for persistence
-    const shape = this.getShapeFromMesh(selectedMesh) || (() => {
-      // Fallback: create shape from current dimensions
-      if (pullKind === 'rect') {
-        const s = new THREE.Shape();
-        const w = pullState?.width ?? startWidth;
-        const l = pullState?.length ?? startLength;
-        s.moveTo(-w / 2, -l / 2);
-        s.lineTo(w / 2, -l / 2);
-        s.lineTo(w / 2, l / 2);
-        s.lineTo(-w / 2, l / 2);
-        s.closePath();
-        return s;
-      } else if (pullKind === 'circle') {
-        const s = new THREE.Shape();
-        const r = pullState?.radius ?? startWidth / 2;
-        s.absarc(0, 0, r, 0, Math.PI * 2, false);
-        return s;
-      }
-      return null;
-    })();
+    const shape =
+      this.getShapeFromMesh(selectedMesh) ??
+      this.buildShapeFromSurfaceMeta(selectedMesh, pullKind, {
+        center: pullState?.center,
+        width: pullState?.width,
+        length: pullState?.length,
+        radius: pullState?.radius,
+        vertices: pullState?.vertices,
+      });
 
     if (!shape) {
       console.warn("[ExtrudeTool] Could not create shape for mesh.");
@@ -499,18 +605,33 @@ export class ExtrudeTool {
       hiddenHelpers,
       mode,
       pullKind,
-      pullState
+      pullState,
+      initialPointerUpDone: false
     };
 
-    try {
-      (event.target as Element | null)?.setPointerCapture?.(event.pointerId);
-    } catch { }
-
+    // Single-click mode: No pointer capture needed
+    // Just listen to pointermove (without holding) and pointerdown for commit
     window.addEventListener("pointermove", this.onPointerMove, { capture: true });
-    window.addEventListener("pointerup", this.onPointerUp, { capture: true });
+    window.addEventListener("pointerdown", this.onSecondClick, { capture: true });
 
     event.preventDefault();
     event.stopPropagation();
+  };
+
+  private onSecondClick = (event: PointerEvent) => {
+    if (!this.active) return;
+
+    // Ignore if clicking on the input element
+    const inputEl = this.active.pullState?.inputEl;
+    if (inputEl && (event.target === inputEl || inputEl.contains(event.target as Node))) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    // Commit the extrude on second click
+    this.finishActiveExtrude({ commit: true });
   };
 
   private onPointerMove = (event: PointerEvent) => {
@@ -521,7 +642,7 @@ export class ExtrudeTool {
       return;
     }
 
-    if (event.pointerId !== this.active.pointerId) return;
+    // In single-click mode, we don't check pointerId since we're not capturing
 
     const isPull = this.active.mode === 'pull';
 
@@ -587,7 +708,9 @@ export class ExtrudeTool {
         // Update State
         state.baseY = nextBaseY;
 
-        const nextHollow = nextDepth * this.active.axisVector.y < 0; // Simple check, might need refinement for bottom pull
+        // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
+        const isMerged = this.active.mesh.userData.extrudeMerged === true;
+        const nextHollow = isMerged && nextDepth * this.active.axisVector.y < 0;
 
         if (Math.abs(nextDepth - this.active.lastDepth) > 1e-4 || Math.abs(nextBaseY - (state.baseY ?? 0)) > 1e-4) {
           this.updatePullGeometry(this.active.mesh, nextDepth, this.active.pullKind!, state, nextHollow);
@@ -637,13 +760,6 @@ export class ExtrudeTool {
         state.inputEl.value = currentL.toFixed(3);
 
       } else if (activeDir === 'radius' && state.radius != null && state.startRadius != null && state.center && state.startCenter) {
-
-        // Radius Logic
-        // Pulling a side of a cylinder.
-        // Delta is expansion of diameter effectively?
-        // See thought process: NewRadius = StartRadius + delta/2.
-        // Center Shift = delta/2 * Axis.
-
         const startR = state.startRadius;
         const currentR = Math.max(0.01, startR + delta / 2); // Radius grows by half delta
 
@@ -673,10 +789,12 @@ export class ExtrudeTool {
     const nextDepth = this.active.startDepth + deltaAlongAxis;
 
     // Normal Extrude Logic (collisions etc) would go here... for now simplistic update:
-
     const depthChanged = Math.abs(nextDepth - this.active.lastDepth) > 1e-4;
     const hollowRequested = event.altKey;
-    const openHole = hollowRequested && nextDepth * this.active.axisVector.y < 0;
+
+    // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
+    const isMerged = this.active.mesh.userData.extrudeMerged === true;
+    const openHole = hollowRequested && isMerged && nextDepth * this.active.axisVector.y < 0;
     const hollowChanged = openHole !== this.active.lastHollow;
     if (!depthChanged && !hollowChanged) return;
 
@@ -698,15 +816,7 @@ export class ExtrudeTool {
     this.active.lastHollow = openHole;
   };
 
-  private onPointerUp = (event: PointerEvent) => {
-    if (!this.active) return;
-    if (event.pointerId !== this.active.pointerId) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-
-    this.finishActiveExtrude({ commit: true, releaseTarget: event.target as Element | null });
-  };
+  // onPointerUp is not used in single-click mode
 
   private finishActiveExtrude(options: { commit: boolean; releaseTarget?: Element | null }) {
     const state = this.active;
@@ -714,13 +824,9 @@ export class ExtrudeTool {
     this.active = null;
 
     window.removeEventListener("pointermove", this.onPointerMove, { capture: true });
-    window.removeEventListener("pointerup", this.onPointerUp, { capture: true });
+    window.removeEventListener("pointerdown", this.onSecondClick, { capture: true });
 
-    try {
-      options.releaseTarget?.releasePointerCapture?.(state.pointerId);
-    } catch {
-      // ignore
-    }
+    options.releaseTarget?.releasePointerCapture?.(state.pointerId);
 
     // Cleanup Input
     if (state.pullState?.inputEl) {
@@ -815,31 +921,21 @@ export class ExtrudeTool {
 
       // Free the original geometry if it was replaced.
       if (state.mesh.geometry !== state.originalGeometry) {
-        try {
-          state.originalGeometry.dispose();
-        } catch {
-          // ignore
-        }
+        state.originalGeometry.dispose();
       }
     } else {
       const current = state.mesh.geometry;
       state.mesh.geometry = state.originalGeometry;
       if (current !== state.originalGeometry) {
-        try {
-          current.dispose();
-        } catch {
-          // ignore
-        }
+        current.dispose();
       }
     }
 
     for (const entry of state.hiddenHelpers) {
-      try {
-        entry.obj.visible = entry.visible;
-      } catch {
-        // ignore
-      }
+      entry.obj.visible = entry.visible;
     }
+
+    this.active = null;
   }
 
   private tryMergeSimpleHollows(target: THREE.Mesh) {
@@ -1073,7 +1169,7 @@ export class ExtrudeTool {
   private findExtrudableMesh(obj: THREE.Object3D): THREE.Mesh | null {
     if ((obj as any).isMesh) {
       const mesh = obj as THREE.Mesh;
-      return this.getShapeFromMesh(mesh) ? mesh : null;
+      return this.isExtrudableMesh(mesh) ? mesh : null;
     }
 
     let found: THREE.Mesh | null = null;
@@ -1082,7 +1178,7 @@ export class ExtrudeTool {
       if (!(child as any).isMesh) return;
       const mesh = child as THREE.Mesh;
       if ((mesh.userData as any)?.selectable === false) return;
-      if (this.getShapeFromMesh(mesh)) found = mesh;
+      if (this.isExtrudableMesh(mesh)) found = mesh;
     });
     return found;
   }
@@ -1330,7 +1426,9 @@ export class ExtrudeTool {
       // We do NOT translate back, because 'state.center' handling below will position it 
       // at the correct World spot.
     }
-    if (hollow && Math.abs(depth) > 1e-4) {
+    // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
+    const isMerged = mesh.userData.extrudeMerged === true;
+    if (hollow && isMerged && Math.abs(depth) > 1e-4) {
       const stripped = this.stripCapAtZ(geometry, 0);
       if (stripped !== geometry) {
         geometry.dispose();
