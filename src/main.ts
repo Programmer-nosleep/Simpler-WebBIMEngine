@@ -34,7 +34,6 @@ const isProjectionMode = (value: string): value is CameraProjectionMode =>
 const isNavigationMode = (value: string): value is NavigationModeOption =>
 	value === "Orbit" || value === "Plan";
 
-
 const init = async () => {
 	let elevationControls: ElevationCameraControls;
 

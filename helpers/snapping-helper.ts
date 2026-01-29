@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { createWeldedEdgesGeometry } from "./geometry";
 
 export type SnapKind = "none" | "endpoint" | "midpoint" | "onEdge";
 
@@ -23,6 +24,8 @@ export class SnappingHelper {
   private raycaster: THREE.Raycaster;
   private snapThreshold: number;
   private meshEdgesCache = new WeakMap<THREE.BufferGeometry, Map<number, THREE.EdgesGeometry>>();
+  private lockedSnapWorld: SnapResult | null = null;
+  private lockedSnapScreen: SnapResult | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -38,6 +41,16 @@ export class SnappingHelper {
     this.snapThreshold = snapThreshold;
   }
 
+  public setSnapThreshold(value: number) {
+    if (!Number.isFinite(value)) return;
+    this.snapThreshold = Math.max(0, value);
+  }
+
+  public clearSnapLocks() {
+    this.lockedSnapWorld = null;
+    this.lockedSnapScreen = null;
+  }
+
   private getMeshEdgesGeometry(geometry: THREE.BufferGeometry, thresholdAngle: number) {
     let byThreshold = this.meshEdgesCache.get(geometry);
     if (!byThreshold) {
@@ -48,9 +61,66 @@ export class SnappingHelper {
     const cached = byThreshold.get(thresholdAngle);
     if (cached) return cached;
 
-    const edges = new THREE.EdgesGeometry(geometry, thresholdAngle);
+    const edges = createWeldedEdgesGeometry(geometry, thresholdAngle);
     byThreshold.set(thresholdAngle, edges);
     return edges;
+  }
+
+  private getPointScreenDistance(
+    pointWorld: THREE.Vector3,
+    mouseScreen: THREE.Vector2,
+    camera: THREE.Camera,
+    rect: DOMRect
+  ) {
+    const pNdc = pointWorld.clone().project(camera);
+    const x = (pNdc.x * 0.5 + 0.5) * rect.width;
+    const y = (-pNdc.y * 0.5 + 0.5) * rect.height;
+    return Math.hypot(x - mouseScreen.x, y - mouseScreen.y);
+  }
+
+  public getBestSnapLocked(
+    hit: THREE.Vector3,
+    currentPoints: THREE.Vector3[],
+    options?: { ignoreIds?: Set<number>; meshEdgeThresholdAngle?: number },
+    lock?: { kinds?: SnapKind[]; releaseDist?: number; switchDist?: number }
+  ): SnapResult | null {
+    const lockKinds = new Set<SnapKind>(lock?.kinds ?? ["endpoint", "midpoint"]);
+    const releaseDist = lock?.releaseDist ?? this.snapThreshold * 1.6;
+    const switchDist = lock?.switchDist ?? this.snapThreshold * 0.1;
+
+    const candidate = this.getBestSnap(hit, currentPoints, options);
+    const locked = this.lockedSnapWorld;
+
+    if (locked && lockKinds.has(locked.kind)) {
+      const lockedDist = hit.distanceTo(locked.point);
+
+      if (candidate && lockKinds.has(candidate.kind)) {
+        const samePoint = candidate.point.distanceTo(locked.point) < 1e-6;
+        if (samePoint && candidate.kind === locked.kind) {
+          this.lockedSnapWorld = candidate;
+          return candidate;
+        }
+
+        if (!samePoint && candidate.dist < lockedDist - switchDist) {
+          this.lockedSnapWorld = candidate;
+          return candidate;
+        }
+      }
+
+      if (lockedDist <= releaseDist) {
+        return { ...locked, dist: lockedDist };
+      }
+
+      this.lockedSnapWorld = null;
+    }
+
+    if (candidate && lockKinds.has(candidate.kind)) {
+      this.lockedSnapWorld = candidate;
+    } else {
+      this.lockedSnapWorld = null;
+    }
+
+    return candidate;
   }
 
   public getBestSnap(
@@ -148,6 +218,54 @@ export class SnappingHelper {
     return best;
   }
 
+  public getBestSnapByScreenLocked(
+    mouseScreen: THREE.Vector2,
+    currentPoints: THREE.Vector3[],
+    snapPixels: number,
+    options?: { ignoreIds?: Set<number>; meshEdgeThresholdAngle?: number },
+    lock?: { kinds?: SnapKind[]; releasePixels?: number; switchPixels?: number }
+  ): SnapResult | null {
+    const lockKinds = new Set<SnapKind>(lock?.kinds ?? ["endpoint", "midpoint"]);
+    const releasePixels = lock?.releasePixels ?? snapPixels * 1.6;
+    const switchPixels = lock?.switchPixels ?? 2;
+
+    const candidate = this.getBestSnapByScreen(mouseScreen, currentPoints, snapPixels, options);
+    const locked = this.lockedSnapScreen;
+
+    if (locked && lockKinds.has(locked.kind)) {
+      const camera = this.getCamera();
+      const rect = this.container.getBoundingClientRect();
+      const lockedDist = this.getPointScreenDistance(locked.point, mouseScreen, camera, rect);
+
+      if (candidate && lockKinds.has(candidate.kind)) {
+        const samePoint = candidate.point.distanceTo(locked.point) < 1e-6;
+        if (samePoint && candidate.kind === locked.kind) {
+          this.lockedSnapScreen = candidate;
+          return candidate;
+        }
+
+        if (!samePoint && candidate.dist < lockedDist - switchPixels) {
+          this.lockedSnapScreen = candidate;
+          return candidate;
+        }
+      }
+
+      if (lockedDist <= releasePixels) {
+        return { ...locked, dist: lockedDist };
+      }
+
+      this.lockedSnapScreen = null;
+    }
+
+    if (candidate && lockKinds.has(candidate.kind)) {
+      this.lockedSnapScreen = candidate;
+    } else {
+      this.lockedSnapScreen = null;
+    }
+
+    return candidate;
+  }
+
   public getBestSnapByScreen(
     mouseScreen: THREE.Vector2,
     currentPoints: THREE.Vector3[],
@@ -156,7 +274,8 @@ export class SnappingHelper {
   ): SnapResult | null {
     const camera = this.getCamera();
     const rect = this.container.getBoundingClientRect();
-    let best: SnapResult | null = null;
+    let bestStrong: SnapResult | null = null;
+    let bestEdge: SnapResult | null = null;
     const ignoreIds = options?.ignoreIds;
     const meshEdgeThresholdAngle = options?.meshEdgeThresholdAngle ?? 25;
 
@@ -169,16 +288,16 @@ export class SnappingHelper {
       return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
     };
 
-    const addEdgeToBest = (edge?: { a: THREE.Vector3; b: THREE.Vector3 }) => {
-      if (!best || !edge) return;
-      const existing = best.edges ?? (best.edge ? [best.edge] : []);
+    const addEdgeToSnap = (snap: SnapResult, edge?: { a: THREE.Vector3; b: THREE.Vector3 }) => {
+      if (!edge) return;
+      const existing = snap.edges ?? (snap.edge ? [snap.edge] : []);
       const keys = new Set(existing.map(keyOfEdge));
       const edgeKey = keyOfEdge(edge);
       if (keys.has(edgeKey)) return;
 
       const next = [...existing, { a: edge.a.clone(), b: edge.b.clone() }];
-      best.edges = next;
-      best.edge ??= next[0];
+      snap.edges = next;
+      snap.edge ??= next[0];
     };
 
     const considerPoint = (
@@ -193,12 +312,15 @@ export class SnappingHelper {
 
       if (dist >= snapPixels) return;
 
-      const samePoint = best && best.point.distanceTo(pointWorld) < 1e-6;
-      const distImproved = !best || dist < best.dist - 0.25;
-      const distTied = best && Math.abs(dist - best.dist) <= 0.25;
+      const isEdge = kind === "onEdge";
+      const targetBest = isEdge ? bestEdge : bestStrong;
+
+      const samePoint = targetBest && targetBest.point.distanceTo(pointWorld) < 1e-6;
+      const distImproved = !targetBest || dist < targetBest.dist - 0.25;
+      const distTied = targetBest && Math.abs(dist - targetBest.dist) <= 0.25;
 
       if (distImproved) {
-        best = {
+        const next: SnapResult = {
           kind,
           point: pointWorld.clone(),
           dist,
@@ -206,11 +328,13 @@ export class SnappingHelper {
             ? { edge: { a: edge.a.clone(), b: edge.b.clone() }, edges: [{ a: edge.a.clone(), b: edge.b.clone() }] }
             : {}),
         };
+        if (isEdge) bestEdge = next;
+        else bestStrong = next;
         return;
       }
 
-      if (best && distTied && best.kind === kind && samePoint) {
-        addEdgeToBest(edge);
+      if (targetBest && distTied && targetBest.kind === kind && samePoint) {
+        addEdgeToSnap(targetBest, edge);
       }
     };
 
@@ -288,7 +412,7 @@ export class SnappingHelper {
       }
     });
 
-    return best;
+    return bestStrong ?? bestEdge;
   }
 
   public getClosestPointOnAxis(origin: THREE.Vector3, axisDir: THREE.Vector3, mouseScreen: THREE.Vector2) {

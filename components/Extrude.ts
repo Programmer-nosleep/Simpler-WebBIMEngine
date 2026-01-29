@@ -1,8 +1,26 @@
 import * as THREE from "three";
 import { buildExtrusionGeometry } from "../helpers/csg";
-import type { FaceRegion } from "../utils/faceRegion";
+import { getCoplanarFaceRegionLocalToRoot, type FaceRegion } from "../utils/faceRegion";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { Brush, Evaluator, ADDITION } from "three-bvh-csg";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import {
+  buildSplitRegionsBorderGeometry,
+  buildWorldTrianglesFromSplitRegion,
+  computeAutoSplitRegionsForFace,
+  computeFaceRegionsForFaceTriangles,
+} from "../helpers/autoFaceSplit";
+import { stripCapAtPlane } from "../helpers/geometryOps";
+import {
+  applyPushPullCSG,
+  buildCutterFromRegion,
+  canonicalizePlaneKey,
+  computePushPullCSGGeometryLocal,
+  pickRegionFromPlaneRegions,
+  type SplitRegion,
+} from "../helpers/pushPullCSG";
 
 type ControlsLike = {
   enabled: boolean;
@@ -43,6 +61,15 @@ type ActiveExtrudeState = {
   pullKind?: 'rect' | 'circle' | 'poly';
   // Single-click mode: track if initial pointerup happened
   initialPointerUpDone?: boolean;
+  csgPull?: {
+    pickPointWorld: THREE.Vector3;
+    hitNormalWorld: THREE.Vector3;
+    region: SplitRegion;
+    baseGeometry: THREE.BufferGeometry;
+    maxInwardDepth?: number;
+    inwardThickness?: number;
+    throughDepth?: number;
+  };
   pullState?: {
     center?: { x: number; z: number };
     width?: number;
@@ -76,6 +103,310 @@ export class ExtrudeTool {
   private raycaster = new THREE.Raycaster();
   private mouse = new THREE.Vector2();
   private active: ActiveExtrudeState | null = null;
+  private autoSplitHoverCache: { meshUuid: string; planeKey: string; regions: SplitRegion[] } | null = null;
+  private csgPreviewRafId: number | null = null;
+  private csgPreviewLastDepth = Number.NaN;
+  private hoverOverlay:
+    | null
+    | {
+        group: THREE.Group;
+        dots: THREE.Points;
+        border: LineSegments2;
+        dotsMat: THREE.PointsMaterial;
+        borderMat: LineMaterial;
+        borderGeo: LineSegmentsGeometry;
+      } = null;
+
+  private static readonly DOT_SPACING = 0.03;
+  private static readonly SURFACE_OFFSET = 0.001;
+  private static readonly DOT_SIZE = 2;
+  private static readonly BORDER_LINE_WIDTH = 4;
+
+  private ensureHoverOverlay() {
+    if (this.hoverOverlay) return this.hoverOverlay;
+
+    const group = new THREE.Group();
+    group.visible = false;
+    group.renderOrder = 999;
+
+    const dotsMat = new THREE.PointsMaterial({
+      color: 0x0066ff,
+      size: ExtrudeTool.DOT_SIZE,
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const dots = new THREE.Points(new THREE.BufferGeometry(), dotsMat);
+    dots.renderOrder = 999;
+
+    const borderGeo = new LineSegmentsGeometry();
+    borderGeo.setPositions([]);
+    const borderMat = new LineMaterial({
+      color: 0x0066ff,
+      linewidth: ExtrudeTool.BORDER_LINE_WIDTH,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      opacity: 1,
+    });
+    const border = new LineSegments2(borderGeo, borderMat);
+    border.renderOrder = 999;
+
+    group.add(dots);
+    group.add(border);
+    this.options.getScene().add(group);
+
+    this.hoverOverlay = { group, dots, border, dotsMat, borderMat, borderGeo };
+    return this.hoverOverlay;
+  }
+
+  private disposeHoverOverlay() {
+    if (!this.hoverOverlay) return;
+    const { group, dots, dotsMat, borderMat, borderGeo } = this.hoverOverlay;
+    try {
+      group.removeFromParent();
+    } catch {
+      // ignore
+    }
+    try {
+      (dots.geometry as THREE.BufferGeometry).dispose();
+    } catch {
+      // ignore
+    }
+    try {
+      borderGeo.dispose();
+    } catch {
+      // ignore
+    }
+    try {
+      borderMat.dispose();
+    } catch {
+      // ignore
+    }
+    try {
+      dotsMat.dispose();
+    } catch {
+      // ignore
+    }
+    this.hoverOverlay = null;
+  }
+
+  private setHoverOverlayVisible(visible: boolean) {
+    if (!this.hoverOverlay) return;
+    this.hoverOverlay.group.visible = visible;
+    if (!visible) this.hoverOverlay.group.position.set(0, 0, 0);
+  }
+
+  private updateHoverOverlayResolution() {
+    if (!this.hoverOverlay) return;
+    const rect = this.container.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = rect.width > 0 ? Math.round(rect.width * dpr) : 1;
+    const h = rect.height > 0 ? Math.round(rect.height * dpr) : 1;
+    this.hoverOverlay.borderMat.resolution.set(w, h);
+  }
+
+  private updateHoverOverlayFromRegion(region: SplitRegion, hitNormalWorld: THREE.Vector3) {
+    const overlay = this.ensureHoverOverlay();
+    this.updateHoverOverlayResolution();
+
+    const offset = ExtrudeTool.SURFACE_OFFSET * 2;
+    const triWorld = buildWorldTrianglesFromSplitRegion(region, hitNormalWorld);
+    if (!triWorld) {
+      this.setHoverOverlayVisible(false);
+      return;
+    }
+
+    const dotsGeo = this.createRegionDotsGeometry(triWorld, ExtrudeTool.DOT_SPACING, offset);
+    const borderGeo = buildSplitRegionsBorderGeometry([region], hitNormalWorld, offset);
+
+    const prevDots = overlay.dots.geometry as THREE.BufferGeometry;
+    overlay.dots.geometry = dotsGeo;
+    try {
+      prevDots.dispose();
+    } catch {
+      // ignore
+    }
+
+    // Replace line geometry (LineSegments2 expects LineSegmentsGeometry)
+    const prevBorder = overlay.border.geometry as LineSegmentsGeometry;
+    overlay.border.geometry = borderGeo as LineSegmentsGeometry;
+    try {
+      prevBorder.dispose();
+    } catch {
+      // ignore
+    }
+
+    overlay.group.visible = true;
+  }
+
+  private createRegionDotsGeometry(triangles: Array<[THREE.Vector3, THREE.Vector3, THREE.Vector3]>, spacing: number, offset: number) {
+    if (!Array.isArray(triangles) || triangles.length === 0) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
+      return geo;
+    }
+
+    const createTriangleDotsGeometry = (
+      tri: [THREE.Vector3, THREE.Vector3, THREE.Vector3],
+      triSpacing: number,
+      triOffset: number
+    ) => {
+      const [a, b, c] = tri;
+      const positions: number[] = [];
+
+      const normal = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+      if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+      normal.normalize();
+
+      if (!Number.isFinite(triSpacing) || triSpacing <= 0) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute([a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z], 3)
+        );
+        return geometry;
+      }
+
+      const u = new THREE.Vector3().subVectors(b, a);
+      if (u.lengthSq() < 1e-12) u.subVectors(c, a);
+      if (u.lengthSq() < 1e-12) u.set(1, 0, 0);
+      u.normalize();
+      const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+      const bRel = new THREE.Vector3().subVectors(b, a);
+      const cRel = new THREE.Vector3().subVectors(c, a);
+      const bx = bRel.dot(u);
+      const by = bRel.dot(v);
+      const cx = cRel.dot(u);
+      const cy = cRel.dot(v);
+
+      const minX = Math.min(0, bx, cx);
+      const maxX = Math.max(0, bx, cx);
+      const minY = Math.min(0, by, cy);
+      const maxY = Math.max(0, by, cy);
+
+      const sign = (px: number, py: number, ax: number, ay: number, bx2: number, by2: number) =>
+        (px - bx2) * (ay - by2) - (ax - bx2) * (py - by2);
+
+      const pointInTri = (px: number, py: number) => {
+        const b1 = sign(px, py, 0, 0, bx, by) < 0;
+        const b2 = sign(px, py, bx, by, cx, cy) < 0;
+        const b3 = sign(px, py, cx, cy, 0, 0) < 0;
+        return b1 === b2 && b2 === b3;
+      };
+
+      const offsetVec = normal.clone().multiplyScalar(triOffset);
+      const p = new THREE.Vector3();
+
+      const xStart = minX + triSpacing / 2;
+      const xEnd = maxX - triSpacing / 2;
+      const yStart = minY + triSpacing / 2;
+      const yEnd = maxY - triSpacing / 2;
+
+      for (let x = xStart; x <= xEnd; x += triSpacing) {
+        for (let y = yStart; y <= yEnd; y += triSpacing) {
+          if (!pointInTri(x, y)) continue;
+          p.copy(a).addScaledVector(u, x).addScaledVector(v, y).add(offsetVec);
+          positions.push(p.x, p.y, p.z);
+        }
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      return geometry;
+    };
+
+    if (triangles.length === 1) return createTriangleDotsGeometry(triangles[0], spacing, offset);
+
+    if (!Number.isFinite(spacing) || spacing <= 0) {
+      const flat: number[] = [];
+      for (const tri of triangles) {
+        flat.push(tri[0].x, tri[0].y, tri[0].z, tri[1].x, tri[1].y, tri[1].z, tri[2].x, tri[2].y, tri[2].z);
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+      return geometry;
+    }
+
+    const [a0, b0, c0] = triangles[0];
+    const normal = new THREE.Vector3().subVectors(b0, a0).cross(new THREE.Vector3().subVectors(c0, a0));
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+
+    const u = new THREE.Vector3().subVectors(b0, a0);
+    if (u.lengthSq() < 1e-12) u.subVectors(c0, a0);
+    if (u.lengthSq() < 1e-12) u.set(1, 0, 0);
+    u.normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    const origin = a0.clone();
+    const tris2d: Array<[number, number, number, number, number, number]> = [];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    const rel = new THREE.Vector3();
+    const to2d = (p: THREE.Vector3) => {
+      rel.subVectors(p, origin);
+      const x = rel.dot(u);
+      const y = rel.dot(v);
+      return { x, y };
+    };
+
+    for (const tri of triangles) {
+      const a = to2d(tri[0]);
+      const b = to2d(tri[1]);
+      const c = to2d(tri[2]);
+      tris2d.push([a.x, a.y, b.x, b.y, c.x, c.y]);
+
+      minX = Math.min(minX, a.x, b.x, c.x);
+      maxX = Math.max(maxX, a.x, b.x, c.x);
+      minY = Math.min(minY, a.y, b.y, c.y);
+      maxY = Math.max(maxY, a.y, b.y, c.y);
+    }
+
+    const sign = (px: number, py: number, ax: number, ay: number, bx2: number, by2: number) =>
+      (px - bx2) * (ay - by2) - (ax - bx2) * (py - by2);
+
+    const pointInTri2d = (px: number, py: number, t: [number, number, number, number, number, number]) => {
+      const [ax, ay, bx2, by2, cx, cy] = t;
+      const b1 = sign(px, py, ax, ay, bx2, by2) < 0;
+      const b2 = sign(px, py, bx2, by2, cx, cy) < 0;
+      const b3 = sign(px, py, cx, cy, ax, ay) < 0;
+      return b1 === b2 && b2 === b3;
+    };
+
+    const positions: number[] = [];
+    const offsetVec = normal.clone().multiplyScalar(offset);
+    const p3 = new THREE.Vector3();
+
+    const xStart = minX + spacing / 2;
+    const xEnd = maxX - spacing / 2;
+    const yStart = minY + spacing / 2;
+    const yEnd = maxY - spacing / 2;
+
+    for (let x = xStart; x <= xEnd; x += spacing) {
+      for (let y = yStart; y <= yEnd; y += spacing) {
+        let inside = false;
+        for (let i = 0; i < tris2d.length; i++) {
+          if (pointInTri2d(x, y, tris2d[i])) {
+            inside = true;
+            break;
+          }
+        }
+        if (!inside) continue;
+
+        p3.copy(origin).addScaledVector(u, x).addScaledVector(v, y).add(offsetVec);
+        positions.push(p3.x, p3.y, p3.z);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    return geometry;
+  }
 
   private getKindFromMesh(mesh: THREE.Mesh): 'rect' | 'circle' | 'poly' | null {
     const ud: any = mesh.userData || {};
@@ -94,9 +425,17 @@ export class ExtrudeTool {
     // Already-extruded meshes (or meshes created from Shape/ExtrudeGeometry) carry the shape.
     if (this.getShapeFromMesh(mesh)) return true;
 
+    // Merged solids (CSG result) can still be push/pull edited via region-based CSG.
+    const ud: any = mesh.userData || {};
+    if (ud.extrudeMerged === true && ud._solidGeometry && (ud._solidGeometry as any).isBufferGeometry) {
+      return true;
+    }
+
+    // Some pipelines persist geometry without keeping a parametric shape.
+    if (ud.isExtruded === true || ud.persistGeometry === true) return true;
+
     // Surfaces created by Rectangle/Circle/Polygon tools store dimensions in `userData.surfaceMeta`.
     const kind = this.getKindFromMesh(mesh);
-    const ud: any = mesh.userData || {};
     const meta = ud.surfaceMeta || {};
 
     if (kind === 'rect') {
@@ -115,6 +454,19 @@ export class ExtrudeTool {
     }
 
     return false;
+  }
+
+  private findSelectedRootForObject(object: THREE.Object3D): THREE.Object3D {
+    const selected = this.options.getSelectedObjects();
+    for (const root of selected) {
+      if (root === object) return root;
+      let found = false;
+      root.traverse((child) => {
+        if (child === object) found = true;
+      });
+      if (found) return root;
+    }
+    return object;
   }
 
   private buildShapeFromSurfaceMeta(
@@ -203,6 +555,9 @@ export class ExtrudeTool {
     this.enabled = true;
     this.container.style.cursor = "ns-resize";
 
+    this.container.addEventListener("pointermove", this.onPointerMove, {
+      capture: true,
+    });
     this.container.addEventListener("pointerdown", this.onPointerDown, {
       capture: true,
     });
@@ -214,12 +569,17 @@ export class ExtrudeTool {
     this.enabled = false;
     this.container.style.cursor = "default";
 
+    this.container.removeEventListener("pointermove", this.onPointerMove, {
+      capture: true,
+    });
     this.container.removeEventListener("pointerdown", this.onPointerDown, {
       capture: true,
     });
     window.removeEventListener("keydown", this.onKeyDown);
 
     this.cancelActiveExtrude();
+    this.autoSplitHoverCache = null;
+    this.disposeHoverOverlay();
   }
 
   private onKeyDown = (event: KeyboardEvent) => {
@@ -231,15 +591,21 @@ export class ExtrudeTool {
       // Commit numeric input
       const val = parseFloat(this.active.pullState?.inputEl.value || '0');
       if (Number.isFinite(val)) {
-        const nextHollow = val * this.active.extrudeNormalWorld.y < 0;
-        this.updatePullGeometry(this.active.mesh, val, this.active.pullKind!, this.active.pullState!, nextHollow);
-        // Note: For width/length pulls, 'val' input handling is ambiguous here. 
-        // We assume numeric input primarily targets Depth for now (or whatever active param is).
-        this.active.lastDepth = val;
-        this.active.lastHollow = nextHollow;
-        this.finishActiveExtrude({ commit: true });
+        const state = this.active;
+        if (state.csgPull) {
+          state.lastDepth = val;
+          state.lastHollow = val < 0;
+          this.finishActiveExtrude({ commit: true, releaseTarget: this.container });
+          return;
+        }
+
+        const nextHollow = val * state.extrudeNormalWorld.y < 0;
+        this.updatePullGeometry(state.mesh, val, state.pullKind!, state.pullState!, nextHollow);
+        state.lastDepth = val;
+        state.lastHollow = nextHollow;
+        this.finishActiveExtrude({ commit: true, releaseTarget: this.container });
       } else {
-        this.finishActiveExtrude({ commit: true });
+        this.finishActiveExtrude({ commit: true, releaseTarget: this.container });
       }
     }
   };
@@ -293,6 +659,26 @@ export class ExtrudeTool {
     }
 
     if (!selectedMesh || !hit) return;
+
+    // Sync face selection (normal + coplanar region) back into selection system.
+    // - normal/region for selection are relative to the selected root (matches src/main.ts behavior).
+    // - region for CSG is computed in "world" space (scene is identity) to match helpers/pushPullCSG.ts expectations.
+    try {
+      const root = this.findSelectedRootForObject(selectedMesh);
+      let normalForRoot: THREE.Vector3 | undefined;
+      if (hit.face?.normal) {
+        const worldNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+        const invRootQuat = new THREE.Quaternion();
+        root.getWorldQuaternion(invRootQuat);
+        invRootQuat.invert();
+        normalForRoot = worldNormal.applyQuaternion(invRootQuat).normalize();
+      }
+
+      const regionForRoot = getCoplanarFaceRegionLocalToRoot(hit, root) ?? undefined;
+      this.options.onPickFace?.(root, normalForRoot, regionForRoot);
+    } catch {
+      // ignore
+    }
 
     // ===== NEW: Support meshes without Shape (already extruded) =====
     const ud: any = selectedMesh.userData || {};
@@ -356,9 +742,10 @@ export class ExtrudeTool {
     const mode: 'normal' | 'pull' = 'pull';
     const pullKind = inferredKind;
     let pullState: ActiveExtrudeState['pullState'];
+    let faceNormalWorld: THREE.Vector3 | null = null;
 
     if (hit.face && hit.face.normal) {
-      const faceNormalWorld = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
+      faceNormalWorld = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
 
       // We assume standard "Floor" orientation: Up is Y (Depth).
       // Check dot product with Y axis.
@@ -386,6 +773,189 @@ export class ExtrudeTool {
         pullDir = 'length';
         axisVector = faceNormalWorld;
         dragSign = Math.sign(localFaceNormal.z);
+      }
+    }
+
+    const isSolid =
+      ud.isExtruded === true ||
+      ud.persistGeometry === true ||
+      ud.extrudeMerged === true ||
+      ud.type === "mass" ||
+      !!ud._solidGeometry ||
+      this.hasAnyStoredSplitRegions(ud);
+
+    let csgPull: ActiveExtrudeState["csgPull"] | undefined;
+    if (isSolid && faceNormalWorld) {
+      const sceneRoot = this.options.getScene();
+      const planeKey = canonicalizePlaneKey(faceNormalWorld, hit.point).key;
+      const splitRegionsByPlane: any = (ud as any).__splitRegionsByPlane;
+      const planeRegions =
+        planeKey && splitRegionsByPlane && Array.isArray(splitRegionsByPlane[planeKey])
+          ? (splitRegionsByPlane[planeKey] as SplitRegion[])
+          : null;
+      const legacyRegions = Array.isArray((ud as any).__splitRegions) ? ((ud as any).__splitRegions as SplitRegion[]) : null;
+
+      let regions: SplitRegion[] | null =
+        (planeRegions?.length ?? 0) > 0 ? planeRegions : (legacyRegions?.length ?? 0) > 0 ? legacyRegions : null;
+
+      if (
+        !regions &&
+        this.autoSplitHoverCache &&
+        this.autoSplitHoverCache.meshUuid === selectedMesh.uuid &&
+        this.autoSplitHoverCache.planeKey === planeKey &&
+        this.autoSplitHoverCache.regions.length > 0
+      ) {
+        regions = this.autoSplitHoverCache.regions;
+      }
+
+      if (!regions) {
+        const faceRegion = getCoplanarFaceRegionLocalToRoot(hit as unknown as THREE.Intersection, sceneRoot);
+        if (faceRegion) {
+          const autoRegions = computeAutoSplitRegionsForFace(
+            sceneRoot,
+            selectedMesh,
+            faceRegion.triangles,
+            faceNormalWorld,
+            hit.point,
+          );
+          const regionsToUse =
+            autoRegions && autoRegions.length > 0
+              ? autoRegions
+              : computeFaceRegionsForFaceTriangles(faceRegion.triangles, faceNormalWorld, hit.point);
+
+          if (autoRegions && autoRegions.length > 0) {
+            this.autoSplitHoverCache = { meshUuid: selectedMesh.uuid, planeKey, regions: autoRegions };
+          } else {
+            this.autoSplitHoverCache = null;
+          }
+
+          if (regionsToUse && regionsToUse.length > 0) regions = regionsToUse;
+        }
+      }
+
+      if (!regions || regions.length === 0) {
+        const geometry = selectedMesh.geometry as THREE.BufferGeometry | undefined;
+        const position = geometry?.getAttribute("position") as THREE.BufferAttribute | undefined;
+        if (geometry && position && typeof hit.faceIndex === "number") {
+          const index = geometry.getIndex();
+          const getTriVertIndex = (tri: number, corner: 0 | 1 | 2) =>
+            index ? index.getX(tri * 3 + corner) : tri * 3 + corner;
+
+          const i0 = getTriVertIndex(hit.faceIndex, 0);
+          const i1 = getTriVertIndex(hit.faceIndex, 1);
+          const i2 = getTriVertIndex(hit.faceIndex, 2);
+
+          if (i0 < position.count && i1 < position.count && i2 < position.count) {
+            selectedMesh.updateWorldMatrix(true, false);
+            const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0)).applyMatrix4(
+              selectedMesh.matrixWorld,
+            );
+            const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1)).applyMatrix4(
+              selectedMesh.matrixWorld,
+            );
+            const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2)).applyMatrix4(
+              selectedMesh.matrixWorld,
+            );
+
+            const plane = canonicalizePlaneKey(faceNormalWorld, hit.point);
+            const qAlign = new THREE.Quaternion().setFromUnitVectors(
+              plane.normal.clone().normalize(),
+              new THREE.Vector3(0, 1, 0),
+            );
+            const p0 = v0.clone().applyQuaternion(qAlign);
+            const p1 = v1.clone().applyQuaternion(qAlign);
+            const p2 = v2.clone().applyQuaternion(qAlign);
+
+            const ring: Array<[number, number]> = [
+              [p0.x, p0.z],
+              [p1.x, p1.z],
+              [p2.x, p2.z],
+              [p0.x, p0.z],
+            ];
+            const cx = (p0.x + p1.x + p2.x) / 3;
+            const cz = (p0.z + p1.z + p2.z) / 3;
+            const planeY = hit.point.clone().applyQuaternion(qAlign).y;
+
+            regions = [
+              {
+                id: `${plane.key}:tri:${hit.faceIndex}`,
+                polygon: [ring],
+                ring,
+                holes: [],
+                center: [cx, cz],
+                basis: { q: [qAlign.x, qAlign.y, qAlign.z, qAlign.w], y: planeY },
+              } as SplitRegion,
+            ];
+          }
+        }
+      }
+
+      if (regions && regions.length > 0) {
+        const picked = pickRegionFromPlaneRegions(regions, hit.point) ?? regions[0];
+
+        let maxInwardDepth: number | undefined;
+        let inwardThickness: number | undefined;
+        let throughDepth: number | undefined;
+
+        const thickBox = new THREE.Box3().setFromObject(selectedMesh);
+        const thickBoxSize = thickBox.getSize(new THREE.Vector3());
+        const n0 = faceNormalWorld.clone().normalize();
+        if (n0.lengthSq() > 1e-12) {
+          const maxDim = Math.max(thickBoxSize.x, thickBoxSize.y, thickBoxSize.z, 1e-6);
+          const rayOffset = Math.max(1e-4, Math.min(1e-2, maxDim * 1e-3));
+          const maxDist = maxDim * 20 + 1;
+
+          const castForThickness = (dir: THREE.Vector3) => {
+            const origin = hit.point.clone().addScaledVector(dir, rayOffset);
+            const rc = new THREE.Raycaster(origin, dir, 0, maxDist);
+            const hits = this.withDoubleSidedMaterials([selectedMesh], () => rc.intersectObject(selectedMesh, false));
+            const exitHit = hits.find((h) => h.distance > rayOffset * 0.25);
+            if (!exitHit || !Number.isFinite(exitHit.distance)) return null;
+            const thickness = exitHit.distance + rayOffset;
+            if (!Number.isFinite(thickness) || thickness < rayOffset * 4) return null;
+            return thickness;
+          };
+
+          const tAlongN = castForThickness(n0);
+          const tAlongNegN = castForThickness(n0.clone().negate());
+          const bestThickness = Math.max(tAlongN ?? 0, tAlongNegN ?? 0);
+          if (bestThickness > 0) {
+            inwardThickness = bestThickness;
+            const minRemain = Math.max(1e-3, Math.min(0.01, bestThickness * 0.03));
+            maxInwardDepth = Math.max(0, bestThickness - minRemain);
+            const throughExtra = Math.max(1e-3, Math.min(0.05, bestThickness * 0.05));
+            throughDepth = bestThickness + throughExtra;
+
+            const inwardDir =
+              tAlongN != null && tAlongNegN != null
+                ? tAlongN >= tAlongNegN
+                  ? n0
+                  : n0.clone().negate()
+                : tAlongN != null
+                  ? n0
+                  : n0.clone().negate();
+            faceNormalWorld = inwardDir.negate().normalize();
+          }
+        }
+
+        const baseGeometry =
+          ((ud as any)._solidGeometry as THREE.BufferGeometry | undefined)?.clone() ??
+          (selectedMesh.geometry as THREE.BufferGeometry).clone();
+        csgPull = {
+          pickPointWorld: hit.point.clone(),
+          hitNormalWorld: (faceNormalWorld ?? new THREE.Vector3(0, 1, 0)).clone(),
+          region: picked,
+          baseGeometry,
+          maxInwardDepth,
+          inwardThickness,
+          throughDepth,
+        };
+
+        // Force CSG pulls to "depth" mode.
+        // Negative depth always means pushing inward.
+        pullDir = "depth";
+        dragSign = 1;
+        axisVector = csgPull.hitNormalWorld.clone();
       }
     }
 
@@ -422,6 +992,56 @@ export class ExtrudeTool {
     input.value = startDepth.toFixed(2);
     input.select();
     setTimeout(() => input.focus(), 10);
+
+    const handleInputChange = () => {
+      const state = this.active;
+      if (!state || state.mode !== "pull" || !state.pullState) return;
+
+      const inputValue = parseFloat(input.value);
+      if (!Number.isFinite(inputValue)) return;
+
+      let nextDepth = inputValue;
+      if (state.csgPull && nextDepth < 0) {
+        const maxInward = state.csgPull.maxInwardDepth;
+        const thickness = state.csgPull.inwardThickness;
+        const throughDepth = state.csgPull.throughDepth;
+        const absDepth = -nextDepth;
+        const t = Number(thickness);
+        const m = Number(maxInward);
+        const snapTol = Number.isFinite(t) ? Math.max(1e-4, Math.min(0.01, t * 0.02)) : 0;
+        const remaining = Number.isFinite(t) && Number.isFinite(m) ? Math.max(0, t - m) : 0;
+
+        const wantsThrough =
+          Number.isFinite(t) &&
+          (absDepth >= Math.max(0, t - snapTol) ||
+            (Number.isFinite(m) && absDepth > Math.max(0, m) + Math.max(snapTol, remaining * 0.25)));
+
+        if (wantsThrough) {
+          const snapThrough = Number.isFinite(Number(throughDepth)) ? Math.max(0, Number(throughDepth)) : Math.max(0, t);
+          nextDepth = -snapThrough;
+        } else if (Number.isFinite(m) && absDepth > Math.max(0, m)) {
+          nextDepth = -Math.max(0, m);
+        }
+      }
+
+      const nextHollow = state.csgPull ? nextDepth < 0 : nextDepth * state.extrudeNormalWorld.y < 0;
+
+      if (Math.abs(nextDepth - state.lastDepth) > 1e-4) {
+        state.lastDepth = nextDepth;
+        state.lastHollow = nextHollow;
+        if (state.csgPull) {
+          if (Math.abs(nextDepth - inputValue) > 1e-4) {
+            input.value = nextDepth.toFixed(3);
+          }
+          this.scheduleCsgPullPreview();
+        } else {
+          this.updatePullGeometry(state.mesh, nextDepth, state.pullKind!, state.pullState, nextHollow);
+        }
+      }
+    };
+
+    input.addEventListener("input", handleInputChange);
+    (input as any).__cleanupHandler = handleInputChange;
 
     const existingShape = this.getShapeFromMesh(selectedMesh);
 
@@ -606,32 +1226,35 @@ export class ExtrudeTool {
       mode,
       pullKind,
       pullState,
+      csgPull,
       initialPointerUpDone: false
     };
 
-    // Single-click mode: No pointer capture needed
-    // Just listen to pointermove (without holding) and pointerdown for commit
+    try { (event.target as Element).setPointerCapture(event.pointerId); } catch { }
     window.addEventListener("pointermove", this.onPointerMove, { capture: true });
-    window.addEventListener("pointerdown", this.onSecondClick, { capture: true });
+    window.addEventListener("pointerup", this.onPointerUp, { capture: true });
 
     event.preventDefault();
     event.stopPropagation();
   };
 
-  private onSecondClick = (event: PointerEvent) => {
+  private onPointerUp = (event: PointerEvent) => {
     if (!this.active) return;
-
-    // Ignore if clicking on the input element
-    const inputEl = this.active.pullState?.inputEl;
-    if (inputEl && (event.target === inputEl || inputEl.contains(event.target as Node))) {
-      return;
-    }
+    if (event.pointerId !== this.active.pointerId) return;
 
     event.preventDefault();
     event.stopPropagation();
 
-    // Commit the extrude on second click
-    this.finishActiveExtrude({ commit: true });
+    // qreasee-style single-click mode:
+    // - first release: enable free movement (no commit)
+    // - second release: commit
+    if (!this.active.initialPointerUpDone) {
+      this.active.initialPointerUpDone = true;
+      try { (event.target as Element)?.releasePointerCapture?.(event.pointerId); } catch { }
+      return;
+    }
+
+    this.finishActiveExtrude({ commit: true, releaseTarget: event.target as Element | null });
   };
 
   private onPointerMove = (event: PointerEvent) => {
@@ -642,7 +1265,7 @@ export class ExtrudeTool {
       return;
     }
 
-    // In single-click mode, we don't check pointerId since we're not capturing
+    if (event.pointerId !== this.active.pointerId) return;
 
     const isPull = this.active.mode === 'pull';
 
@@ -650,6 +1273,62 @@ export class ExtrudeTool {
     if (isPull && this.active.pullState) {
       event.preventDefault();
       event.stopPropagation();
+
+      // Region-based CSG push/pull (solid faces / stored split regions)
+      if (this.active.csgPull) {
+        const planeHit = this.intersectDragPlane(event, this.active.dragPlane);
+        let delta = 0;
+        if (planeHit) {
+          const deltaVec = new THREE.Vector3().subVectors(planeHit, this.active.startPlanePoint);
+          delta = deltaVec.dot(this.active.axisVector);
+        } else {
+          const dy = (this.active.pullState.startMouseY - event.clientY);
+          delta = dy * 0.05;
+        }
+
+        const startD = this.active.pullState.startDepth ?? 0;
+        let nextDepth = startD + delta;
+        const maxInward = this.active.csgPull.maxInwardDepth;
+        const thickness = this.active.csgPull.inwardThickness;
+        const throughDepth = this.active.csgPull.throughDepth;
+        if (nextDepth < 0) {
+          const absDepth = -nextDepth;
+          const t = Number(thickness);
+          const m = Number(maxInward);
+          const snapTol = Number.isFinite(t) ? Math.max(1e-4, Math.min(0.01, t * 0.02)) : 0;
+          const remaining = Number.isFinite(t) && Number.isFinite(m) ? Math.max(0, t - m) : 0;
+
+          const wantsThrough =
+            Number.isFinite(t) &&
+            (absDepth >= Math.max(0, t - snapTol) ||
+              (Number.isFinite(m) && absDepth > Math.max(0, m) + Math.max(snapTol, remaining * 0.25)));
+
+          if (wantsThrough) {
+            const snapThrough = Number.isFinite(Number(throughDepth)) ? Math.max(0, Number(throughDepth)) : Math.max(0, t);
+            nextDepth = -snapThrough;
+          } else if (Number.isFinite(m) && absDepth > Math.max(0, m)) {
+            nextDepth = -Math.max(0, m);
+          }
+        }
+        const nextHollow = nextDepth < 0;
+
+        if (Math.abs(nextDepth - this.active.lastDepth) <= 1e-4) return;
+
+        this.active.lastDepth = nextDepth;
+        this.active.lastHollow = nextHollow;
+        this.active.pullState.inputEl.value = nextDepth.toFixed(3);
+        this.scheduleCsgPullPreview();
+
+        if (this.hoverOverlay?.group.visible) {
+          const depthOffset = this.active.lastDepth - (this.active.startDepth ?? 0);
+          const v = this.active.axisVector.clone();
+          const len = v.length();
+          if (len > 1e-10) v.multiplyScalar(depthOffset / len);
+          else v.set(0, 0, 0);
+          this.hoverOverlay.group.position.copy(v);
+        }
+        return;
+      }
 
       const state = this.active.pullState;
 
@@ -676,11 +1355,13 @@ export class ExtrudeTool {
       // Shift = Axis * (Delta / 2).
       // Note: Axis is normalized Face Normal.
 
-      // Map Axis back to local X/Z for Center shift.
-      const invWorldRot = new THREE.Quaternion();
-      this.active.mesh.getWorldQuaternion(invWorldRot);
-      invWorldRot.invert();
-      const localAxis = this.active.axisVector.clone().applyQuaternion(invWorldRot);
+      // IMPORTANT:
+      // `state.center` is stored in WORLD X/Z coordinates, so the shift must also be computed in WORLD space.
+      // Project onto the base plane to avoid drifting off-plane for slanted faces.
+      const shiftDirWorld = this.active.axisVector
+        .clone()
+        .projectOnPlane(this.active.extrudeNormalWorld)
+        .normalize();
 
       if (activeDir === 'depth') {
         // Depth Logic (Y-axis generally)
@@ -699,20 +1380,23 @@ export class ExtrudeTool {
         // Formula: BaseShift = (localAxis.y < -0.5) ? -delta : 0;
 
         let baseChange = 0;
+        const invWorldRot = new THREE.Quaternion();
+        this.active.mesh.getWorldQuaternion(invWorldRot);
+        invWorldRot.invert();
+        const localAxis = this.active.axisVector.clone().applyQuaternion(invWorldRot);
         if (localAxis.y < -0.5) {
           baseChange = -delta;
         }
 
         const nextBaseY = startB + baseChange;
-
-        // Update State
+        const prevBaseY = state.baseY ?? 0;
         state.baseY = nextBaseY;
 
         // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
         const isMerged = this.active.mesh.userData.extrudeMerged === true;
         const nextHollow = isMerged && nextDepth * this.active.axisVector.y < 0;
 
-        if (Math.abs(nextDepth - this.active.lastDepth) > 1e-4 || Math.abs(nextBaseY - (state.baseY ?? 0)) > 1e-4) {
+        if (Math.abs(nextDepth - this.active.lastDepth) > 1e-4 || Math.abs(nextBaseY - prevBaseY) > 1e-4) {
           this.updatePullGeometry(this.active.mesh, nextDepth, this.active.pullKind!, state, nextHollow);
           this.active.lastDepth = nextDepth;
           this.active.lastHollow = nextHollow;
@@ -723,13 +1407,13 @@ export class ExtrudeTool {
 
         const startW = state.startWidth;
         const currentW = Math.max(0.1, startW + delta); // One-sided expansion: simply add delta
+        const appliedDelta = currentW - startW;
 
         // Center Shift
         // Shift amount = delta / 2
-        // Direction = localAxis (which component? X)
-        // Actually, just project localAxis * (delta/2) to X/Z
-        const shiftX = localAxis.x * (delta / 2);
-        const shiftZ = localAxis.z * (delta / 2);
+        // Direction = picked face normal (world), projected onto base plane.
+        const shiftX = shiftDirWorld.x * (appliedDelta / 2);
+        const shiftZ = shiftDirWorld.z * (appliedDelta / 2);
 
         state.width = currentW;
 
@@ -743,16 +1427,13 @@ export class ExtrudeTool {
 
         const startL = state.startLength;
         const currentL = Math.max(0.1, startL + delta);
+        const appliedDelta = currentL - startL;
 
-        const shiftX = localAxis.x * (delta / 2);
-        const shiftZ = localAxis.z * (delta / 2);
+        const shiftX = shiftDirWorld.x * (appliedDelta / 2);
+        const shiftZ = shiftDirWorld.z * (appliedDelta / 2);
 
         state.length = currentL;
 
-        // Poly One-Sided Logic:
-        // If Poly, we MUST shift center to keep opposite side fixed.
-        // Delta is total expansion. Shift is half delta.
-        // Direction depends on dragSign (which side was pulled).
         state.center.x = state.startCenter.x + shiftX;
         state.center.z = state.startCenter.z + shiftZ;
 
@@ -762,9 +1443,10 @@ export class ExtrudeTool {
       } else if (activeDir === 'radius' && state.radius != null && state.startRadius != null && state.center && state.startCenter) {
         const startR = state.startRadius;
         const currentR = Math.max(0.01, startR + delta / 2); // Radius grows by half delta
+        const appliedDelta = currentR - startR;
 
-        const shiftX = localAxis.x * (delta / 2);
-        const shiftZ = localAxis.z * (delta / 2);
+        const shiftX = shiftDirWorld.x * appliedDelta;
+        const shiftZ = shiftDirWorld.z * appliedDelta;
 
         state.radius = currentR;
         state.center.x = state.startCenter.x + shiftX;
@@ -816,20 +1498,100 @@ export class ExtrudeTool {
     this.active.lastHollow = openHole;
   };
 
-  // onPointerUp is not used in single-click mode
+  private disposeTempMeshResources(tempMesh: THREE.Mesh) {
+    try { (tempMesh.geometry as THREE.BufferGeometry | undefined)?.dispose?.(); } catch { }
+    const mats = Array.isArray(tempMesh.material) ? tempMesh.material : [tempMesh.material];
+    for (const m of mats) {
+      try { (m as THREE.Material)?.dispose?.(); } catch { }
+    }
+  }
+
+  private scheduleCsgPullPreview() {
+    if (this.csgPreviewRafId != null) return;
+
+    this.csgPreviewRafId = window.requestAnimationFrame(() => {
+      this.csgPreviewRafId = null;
+      const state = this.active;
+      if (!state?.csgPull) return;
+
+      const pullSigned = state.lastDepth;
+      if (Math.abs(pullSigned - this.csgPreviewLastDepth) < 1e-4) return;
+      this.csgPreviewLastDepth = pullSigned;
+
+      const meshUd: any = state.mesh.userData || {};
+      if (meshUd.__extrudeEdges) (meshUd.__extrudeEdges as THREE.Object3D).visible = false;
+
+      // Near-zero = restore original (avoid boolean jitter).
+      if (Math.abs(pullSigned) <= 1e-4) {
+        const current = state.mesh.geometry;
+        state.mesh.geometry = state.originalGeometry;
+        if (current !== state.originalGeometry) {
+          try { (current as THREE.BufferGeometry).dispose(); } catch { }
+        }
+        return;
+      }
+
+      const cutter = buildCutterFromRegion(state.csgPull.region, pullSigned, state.csgPull.hitNormalWorld);
+      let nextGeom = computePushPullCSGGeometryLocal(state.mesh, cutter, pullSigned, state.csgPull.baseGeometry);
+      this.disposeTempMeshResources(cutter);
+
+      if (!nextGeom) return;
+
+      if (pullSigned < 0) {
+        const capPointLocal = state.csgPull.pickPointWorld
+          .clone()
+          .add(state.csgPull.hitNormalWorld.clone().multiplyScalar(pullSigned));
+        state.mesh.worldToLocal(capPointLocal);
+
+        const invWorldRot = new THREE.Quaternion();
+        state.mesh.getWorldQuaternion(invWorldRot);
+        invWorldRot.invert();
+        const normalLocal = state.csgPull.hitNormalWorld.clone().applyQuaternion(invWorldRot).normalize();
+
+        const capPlaneLocal = new THREE.Plane().setFromNormalAndCoplanarPoint(normalLocal, capPointLocal);
+        const strippedGeom = stripCapAtPlane(nextGeom, capPlaneLocal, 0.01);
+        if (strippedGeom !== nextGeom) {
+          nextGeom.dispose();
+          nextGeom = strippedGeom;
+        }
+      }
+
+      const oldGeom = state.mesh.geometry;
+      state.mesh.geometry = nextGeom;
+      if (oldGeom !== state.originalGeometry) {
+        try { (oldGeom as THREE.BufferGeometry).dispose(); } catch { }
+      }
+    });
+  }
 
   private finishActiveExtrude(options: { commit: boolean; releaseTarget?: Element | null }) {
     const state = this.active;
     if (!state) return;
     this.active = null;
 
-    window.removeEventListener("pointermove", this.onPointerMove, { capture: true });
-    window.removeEventListener("pointerdown", this.onSecondClick, { capture: true });
+    if (this.csgPreviewRafId != null) {
+      try { cancelAnimationFrame(this.csgPreviewRafId); } catch { }
+      this.csgPreviewRafId = null;
+    }
+    this.csgPreviewLastDepth = Number.NaN;
 
-    options.releaseTarget?.releasePointerCapture?.(state.pointerId);
+    window.removeEventListener("pointermove", this.onPointerMove, { capture: true });
+    window.removeEventListener("pointerup", this.onPointerUp, { capture: true });
+
+    try {
+      options.releaseTarget?.releasePointerCapture?.(state.pointerId);
+    } catch {
+      // ignore
+    }
+
+    this.setHoverOverlayVisible(false);
 
     // Cleanup Input
     if (state.pullState?.inputEl) {
+      const inputAny: any = state.pullState.inputEl as any;
+      if (inputAny?.__cleanupHandler) {
+        try { state.pullState.inputEl.removeEventListener("input", inputAny.__cleanupHandler); } catch { }
+      }
       state.pullState.inputEl.remove();
     }
 
@@ -841,10 +1603,72 @@ export class ExtrudeTool {
     }
 
     if (options.commit) {
-      const ud: any = state.mesh.userData || {};
-      ud.extrudeDepth = state.lastDepth;
-      ud.extrudeHollow = state.lastHollow;
-      ud.extrudeWallThickness = 0;
+      if (state.csgPull) {
+        const pullSigned = state.lastDepth;
+        const hadPreview = state.mesh.geometry !== state.originalGeometry;
+
+        if (Math.abs(pullSigned) > 1e-4) {
+          const cutter = buildCutterFromRegion(state.csgPull.region, pullSigned, state.csgPull.hitNormalWorld);
+          const applied = applyPushPullCSG(state.mesh, cutter, pullSigned, state.csgPull.baseGeometry);
+
+          if (applied) {
+            const solidClone = (state.mesh.geometry as THREE.BufferGeometry).clone();
+
+            if (pullSigned < 0) {
+              const capPointLocal = state.csgPull.pickPointWorld
+                .clone()
+                .add(state.csgPull.hitNormalWorld.clone().multiplyScalar(pullSigned));
+              state.mesh.worldToLocal(capPointLocal);
+
+              const invWorldRot = new THREE.Quaternion();
+              state.mesh.getWorldQuaternion(invWorldRot);
+              invWorldRot.invert();
+              const normalLocal = state.csgPull.hitNormalWorld.clone().applyQuaternion(invWorldRot).normalize();
+
+              const capPlaneLocal = new THREE.Plane().setFromNormalAndCoplanarPoint(normalLocal, capPointLocal);
+              const strippedGeom = stripCapAtPlane(state.mesh.geometry, capPlaneLocal, 0.01);
+              if (strippedGeom !== state.mesh.geometry) {
+                state.mesh.geometry.dispose();
+                state.mesh.geometry = strippedGeom;
+              }
+            }
+
+            if (hadPreview) {
+              try { state.originalGeometry.dispose(); } catch { }
+            }
+
+            const udAfter: any = state.mesh.userData || {};
+            if (udAfter._solidGeometry && udAfter._solidGeometry !== solidClone) {
+              try { (udAfter._solidGeometry as THREE.BufferGeometry).dispose(); } catch { }
+            }
+            udAfter._solidGeometry = solidClone;
+            udAfter.extrudeMerged = true;
+            udAfter.persistGeometry = true;
+            udAfter.isExtruded = true;
+            delete udAfter.extrudeShape;
+            delete udAfter.surfaceMeta;
+            state.mesh.userData = udAfter;
+
+            this.updateEdgesHelper(state.mesh);
+          } else {
+            const current = state.mesh.geometry;
+            state.mesh.geometry = state.originalGeometry;
+            if (current !== state.originalGeometry) {
+              try { (current as THREE.BufferGeometry).dispose(); } catch { }
+            }
+          }
+        } else {
+          const current = state.mesh.geometry;
+          state.mesh.geometry = state.originalGeometry;
+          if (current !== state.originalGeometry) {
+            try { (current as THREE.BufferGeometry).dispose(); } catch { }
+          }
+        }
+      } else {
+        const ud: any = state.mesh.userData || {};
+        ud.extrudeDepth = state.lastDepth;
+        ud.extrudeHollow = state.lastHollow;
+        ud.extrudeWallThickness = 0;
       ud.extrudeFloorThickness = 0;
       ud.extrudeExtraCut = 0.1;
       let committedShape = state.shape;
@@ -923,12 +1747,17 @@ export class ExtrudeTool {
       if (state.mesh.geometry !== state.originalGeometry) {
         state.originalGeometry.dispose();
       }
+      }
     } else {
       const current = state.mesh.geometry;
       state.mesh.geometry = state.originalGeometry;
       if (current !== state.originalGeometry) {
         current.dispose();
       }
+    }
+
+    if (state.csgPull) {
+      try { state.csgPull.baseGeometry.dispose(); } catch { }
     }
 
     for (const entry of state.hiddenHelpers) {
@@ -1154,7 +1983,7 @@ export class ExtrudeTool {
   }
   private cancelActiveExtrude() {
     if (!this.active) return;
-    this.finishActiveExtrude({ commit: false });
+    this.finishActiveExtrude({ commit: false, releaseTarget: this.container });
   }
 
   private getSelectedExtrudableMesh(): THREE.Mesh | null {
@@ -1169,6 +1998,7 @@ export class ExtrudeTool {
   private findExtrudableMesh(obj: THREE.Object3D): THREE.Mesh | null {
     if ((obj as any).isMesh) {
       const mesh = obj as THREE.Mesh;
+      if ((mesh.userData as any)?.selectable === false) return null;
       return this.isExtrudableMesh(mesh) ? mesh : null;
     }
 
@@ -1398,8 +2228,13 @@ export class ExtrudeTool {
 
     if (!shape) return;
 
-    // Build a zero-thickness extrusion
-    geometry = buildExtrusionGeometry(shape, depth, { hollow: false });
+    const isMerged = !!meshUd.extrudeMerged;
+    geometry = buildExtrusionGeometry(shape, depth, {
+      hollow: isMerged,
+      wallThickness: meshUd.extrudeWallThickness,
+      floorThickness: meshUd.extrudeFloorThickness,
+      extraCut: meshUd.extrudeExtraCut,
+    });
 
     // For Poly scaling, we must center and scale the geometry if Width/Length changed
     if (kind === 'poly' && state.width != null && state.length != null && state.startWidth && state.startLength) {
@@ -1426,9 +2261,8 @@ export class ExtrudeTool {
       // We do NOT translate back, because 'state.center' handling below will position it 
       // at the correct World spot.
     }
-    // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
-    const isMerged = mesh.userData.extrudeMerged === true;
-    if (hollow && isMerged && Math.abs(depth) > 1e-4) {
+    // For non-merged meshes, "hollow" means opening the cap (no wall/floor solids).
+    if (!isMerged && hollow && Math.abs(depth) > 1e-4) {
       const stripped = this.stripCapAtZ(geometry, 0);
       if (stripped !== geometry) {
         geometry.dispose();
@@ -1480,6 +2314,9 @@ export class ExtrudeTool {
       old.dispose();
     }
 
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+
     const ud: any = mesh.userData || {};
     ud.depth = depth;
     ud.isExtruded = true;
@@ -1489,12 +2326,12 @@ export class ExtrudeTool {
   private updateHover(event: PointerEvent) {
     let hit: THREE.Intersection | null = null;
     let selectedMesh: THREE.Mesh | null = this.getSelectedExtrudableMesh();
+    const scene = this.options.getScene();
 
     if (selectedMesh) {
       hit = this.raycastMesh(event, selectedMesh);
     } else {
       // Raycast all
-      const scene = this.options.getScene();
       const candidates: THREE.Mesh[] = [];
       scene.traverse((obj) => {
         if ((obj as any).isMesh) {
@@ -1525,9 +2362,131 @@ export class ExtrudeTool {
 
     if (selectedMesh && hit) {
       this.options.onHover?.(selectedMesh, hit.faceIndex ?? null);
+
+      const ud: any = selectedMesh.userData || {};
+      const isSolid =
+        ud.isExtruded === true ||
+        ud.persistGeometry === true ||
+        ud.extrudeMerged === true ||
+        ud.type === "mass" ||
+        !!ud._solidGeometry ||
+        this.hasAnyStoredSplitRegions(ud);
+      if (isSolid && hit.face?.normal) {
+        const faceNormalWorld = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
+        const planeKey = canonicalizePlaneKey(faceNormalWorld, hit.point).key;
+
+        let regions: SplitRegion[] | null = null;
+        const byPlane = (ud as any).__splitRegionsByPlane as Record<string, SplitRegion[]> | undefined;
+        const planeRegions = byPlane?.[planeKey];
+        const legacyRegions = Array.isArray((ud as any).__splitRegions) ? ((ud as any).__splitRegions as SplitRegion[]) : null;
+        if (Array.isArray(planeRegions) && planeRegions.length > 0) {
+          regions = planeRegions;
+        } else if (Array.isArray(legacyRegions) && legacyRegions.length > 0) {
+          regions = legacyRegions;
+        } else if (
+          this.autoSplitHoverCache &&
+          this.autoSplitHoverCache.meshUuid === selectedMesh.uuid &&
+          this.autoSplitHoverCache.planeKey === planeKey &&
+          this.autoSplitHoverCache.regions.length > 0
+        ) {
+          regions = this.autoSplitHoverCache.regions;
+        } else {
+          // Build face triangles in "scene root" space to match autoFaceSplit expectations.
+          let faceRegionWorld: FaceRegion | null = getCoplanarFaceRegionLocalToRoot(hit, scene);
+          if (!faceRegionWorld) {
+            const geom = selectedMesh.geometry as THREE.BufferGeometry | undefined;
+            const pos = geom?.getAttribute("position") as THREE.BufferAttribute | undefined;
+            if (geom && pos && typeof hit.faceIndex === "number") {
+              const index = geom.getIndex();
+              const i0 = index ? index.getX(hit.faceIndex * 3 + 0) : hit.faceIndex * 3 + 0;
+              const i1 = index ? index.getX(hit.faceIndex * 3 + 1) : hit.faceIndex * 3 + 1;
+              const i2 = index ? index.getX(hit.faceIndex * 3 + 2) : hit.faceIndex * 3 + 2;
+
+              scene.updateWorldMatrix(true, true);
+              selectedMesh.updateWorldMatrix(true, false);
+              const invRoot = new THREE.Matrix4().copy(scene.matrixWorld).invert();
+
+              const v0 = new THREE.Vector3(pos.getX(i0), pos.getY(i0), pos.getZ(i0))
+                .applyMatrix4(selectedMesh.matrixWorld)
+                .applyMatrix4(invRoot);
+              const v1 = new THREE.Vector3(pos.getX(i1), pos.getY(i1), pos.getZ(i1))
+                .applyMatrix4(selectedMesh.matrixWorld)
+                .applyMatrix4(invRoot);
+              const v2 = new THREE.Vector3(pos.getX(i2), pos.getY(i2), pos.getZ(i2))
+                .applyMatrix4(selectedMesh.matrixWorld)
+                .applyMatrix4(invRoot);
+
+              faceRegionWorld = { triangles: [[v0, v1, v2]] };
+            }
+          }
+
+          if (faceRegionWorld) {
+            const auto = computeAutoSplitRegionsForFace(scene, selectedMesh, faceRegionWorld.triangles, faceNormalWorld, hit.point);
+            if (Array.isArray(auto) && auto.length > 0) {
+              regions = auto;
+              this.autoSplitHoverCache = { meshUuid: selectedMesh.uuid, planeKey, regions: auto };
+            } else {
+              const base = computeFaceRegionsForFaceTriangles(faceRegionWorld.triangles, faceNormalWorld, hit.point);
+              if (Array.isArray(base) && base.length > 0) regions = base;
+              this.autoSplitHoverCache = null;
+            }
+          } else {
+            this.autoSplitHoverCache = null;
+          }
+        }
+
+        const picked = regions ? pickRegionFromPlaneRegions(regions, hit.point) : null;
+        if (picked) {
+          this.updateHoverOverlayFromRegion(picked, faceNormalWorld);
+          // Ensure hover overlay is not left offset from previous drag.
+          if (!this.active && this.hoverOverlay) this.hoverOverlay.group.position.set(0, 0, 0);
+        } else {
+          this.setHoverOverlayVisible(false);
+        }
+      } else {
+        this.setHoverOverlayVisible(false);
+      }
     } else {
       this.options.onHover?.(null, null);
+      this.setHoverOverlayVisible(false);
     }
+  }
+
+  private hasAnyStoredSplitRegions(userData: any): boolean {
+    if (!userData || typeof userData !== "object") return false;
+    const byPlane = (userData as any).__splitRegionsByPlane;
+    if (byPlane && typeof byPlane === "object") {
+      for (const key of Object.keys(byPlane)) {
+        const regions = (byPlane as any)[key];
+        if (Array.isArray(regions) && regions.length > 0) return true;
+      }
+    }
+    return Array.isArray((userData as any).__splitRegions) && (userData as any).__splitRegions.length > 0;
+  }
+
+  private withDoubleSidedMaterials<T>(meshes: THREE.Mesh[], fn: () => T): T {
+    const prevSides = new Map<THREE.Material, number>();
+
+    const mark = (mat: THREE.Material | undefined | null) => {
+      if (!mat) return;
+      if (!prevSides.has(mat)) prevSides.set(mat, (mat as any).side ?? THREE.FrontSide);
+      (mat as any).side = THREE.DoubleSide;
+    };
+
+    for (const mesh of meshes) {
+      const material: any = (mesh as any).material;
+      if (Array.isArray(material)) {
+        for (const m of material) mark(m);
+      } else {
+        mark(material);
+      }
+    }
+
+    const result = fn();
+    for (const [mat, side] of prevSides) {
+      (mat as any).side = side;
+    }
+    return result;
   }
 
   private getShapeDimensions(shape: THREE.Shape) {
