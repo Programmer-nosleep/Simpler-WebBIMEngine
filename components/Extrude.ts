@@ -2,7 +2,6 @@ import * as THREE from "three";
 import { buildExtrusionGeometry } from "../helpers/csg";
 import { getCoplanarFaceRegionLocalToRoot, type FaceRegion } from "../utils/faceRegion";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { Brush, Evaluator, ADDITION } from "three-bvh-csg";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -12,15 +11,14 @@ import {
   computeAutoSplitRegionsForFace,
   computeFaceRegionsForFaceTriangles,
 } from "../helpers/autoFaceSplit";
-import { stripCapAtPlane } from "../helpers/geometryOps";
 import {
-  applyPushPullCSG,
-  buildCutterFromRegion,
   canonicalizePlaneKey,
-  computePushPullCSGGeometryLocal,
   pickRegionFromPlaneRegions,
   type SplitRegion,
 } from "../helpers/pushPullCSG";
+
+const EXTRUDE_OUTLINE_VERSION = 3;
+const ENABLE_EXTRUDE_OUTLINES = true;
 
 type ControlsLike = {
   enabled: boolean;
@@ -61,15 +59,6 @@ type ActiveExtrudeState = {
   pullKind?: 'rect' | 'circle' | 'poly';
   // Single-click mode: track if initial pointerup happened
   initialPointerUpDone?: boolean;
-  csgPull?: {
-    pickPointWorld: THREE.Vector3;
-    hitNormalWorld: THREE.Vector3;
-    region: SplitRegion;
-    baseGeometry: THREE.BufferGeometry;
-    maxInwardDepth?: number;
-    inwardThickness?: number;
-    throughDepth?: number;
-  };
   pullState?: {
     center?: { x: number; z: number };
     width?: number;
@@ -77,6 +66,7 @@ type ActiveExtrudeState = {
     radius?: number;
     baseY?: number; // New: Vertical offset for bottom-pull
     vertices?: Array<{ x: number; z: number }>;
+    startMouseX: number;
     startMouseY: number;
     inputEl: HTMLInputElement;
     pullDir?: 'depth' | 'width' | 'length' | 'radius';
@@ -104,8 +94,6 @@ export class ExtrudeTool {
   private mouse = new THREE.Vector2();
   private active: ActiveExtrudeState | null = null;
   private autoSplitHoverCache: { meshUuid: string; planeKey: string; regions: SplitRegion[] } | null = null;
-  private csgPreviewRafId: number | null = null;
-  private csgPreviewLastDepth = Number.NaN;
   private hoverOverlay:
     | null
     | {
@@ -163,31 +151,11 @@ export class ExtrudeTool {
   private disposeHoverOverlay() {
     if (!this.hoverOverlay) return;
     const { group, dots, dotsMat, borderMat, borderGeo } = this.hoverOverlay;
-    try {
-      group.removeFromParent();
-    } catch {
-      // ignore
-    }
-    try {
-      (dots.geometry as THREE.BufferGeometry).dispose();
-    } catch {
-      // ignore
-    }
-    try {
-      borderGeo.dispose();
-    } catch {
-      // ignore
-    }
-    try {
-      borderMat.dispose();
-    } catch {
-      // ignore
-    }
-    try {
-      dotsMat.dispose();
-    } catch {
-      // ignore
-    }
+    group.removeFromParent(); 
+    (dots.geometry as THREE.BufferGeometry).dispose(); 
+    borderGeo.dispose(); 
+    borderMat.dispose(); 
+    dotsMat.dispose(); 
     this.hoverOverlay = null;
   }
 
@@ -222,20 +190,12 @@ export class ExtrudeTool {
 
     const prevDots = overlay.dots.geometry as THREE.BufferGeometry;
     overlay.dots.geometry = dotsGeo;
-    try {
-      prevDots.dispose();
-    } catch {
-      // ignore
-    }
+    prevDots.dispose();
 
     // Replace line geometry (LineSegments2 expects LineSegmentsGeometry)
     const prevBorder = overlay.border.geometry as LineSegmentsGeometry;
     overlay.border.geometry = borderGeo as LineSegmentsGeometry;
-    try {
-      prevBorder.dispose();
-    } catch {
-      // ignore
-    }
+    prevBorder.dispose(); 
 
     overlay.group.visible = true;
   }
@@ -553,7 +513,7 @@ export class ExtrudeTool {
   public enable() {
     if (this.enabled) return;
     this.enabled = true;
-    this.container.style.cursor = "ns-resize";
+    this.container.style.cursor = "ew-resize";
 
     this.container.addEventListener("pointermove", this.onPointerMove, {
       capture: true,
@@ -562,6 +522,8 @@ export class ExtrudeTool {
       capture: true,
     });
     window.addEventListener("keydown", this.onKeyDown);
+
+    this.restoreOutlines();
   }
 
   public disable() {
@@ -592,14 +554,7 @@ export class ExtrudeTool {
       const val = parseFloat(this.active.pullState?.inputEl.value || '0');
       if (Number.isFinite(val)) {
         const state = this.active;
-        if (state.csgPull) {
-          state.lastDepth = val;
-          state.lastHollow = val < 0;
-          this.finishActiveExtrude({ commit: true, releaseTarget: this.container });
-          return;
-        }
-
-        const nextHollow = val * state.extrudeNormalWorld.y < 0;
+        const nextHollow = val < 0;
         this.updatePullGeometry(state.mesh, val, state.pullKind!, state.pullState!, nextHollow);
         state.lastDepth = val;
         state.lastHollow = nextHollow;
@@ -639,15 +594,6 @@ export class ExtrudeTool {
 
       const hits = this.raycaster.intersectObjects(candidates, true);
 
-      // Hover logic (can be removed or kept as is)
-      if (hits.length > 0) {
-        const first = hits[0];
-        const mesh = this.findExtrudableMesh(first.object);
-        this.options.onHover?.(mesh || null, mesh ? first.faceIndex ?? null : null);
-      } else {
-        this.options.onHover?.(null, null);
-      }
-
       for (const h of hits) {
         const mesh = this.findExtrudableMesh(h.object);
         if (mesh) {
@@ -658,27 +604,27 @@ export class ExtrudeTool {
       }
     }
 
-    if (!selectedMesh || !hit) return;
+    if (!selectedMesh || !hit) {
+      this.options.onHover?.(null, null);
+      return;
+    }
+    this.options.onHover?.(selectedMesh, hit.faceIndex ?? null);
 
     // Sync face selection (normal + coplanar region) back into selection system.
     // - normal/region for selection are relative to the selected root (matches src/main.ts behavior).
     // - region for CSG is computed in "world" space (scene is identity) to match helpers/pushPullCSG.ts expectations.
-    try {
-      const root = this.findSelectedRootForObject(selectedMesh);
-      let normalForRoot: THREE.Vector3 | undefined;
-      if (hit.face?.normal) {
-        const worldNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-        const invRootQuat = new THREE.Quaternion();
-        root.getWorldQuaternion(invRootQuat);
-        invRootQuat.invert();
-        normalForRoot = worldNormal.applyQuaternion(invRootQuat).normalize();
-      }
-
-      const regionForRoot = getCoplanarFaceRegionLocalToRoot(hit, root) ?? undefined;
-      this.options.onPickFace?.(root, normalForRoot, regionForRoot);
-    } catch {
-      // ignore
+    const root = this.findSelectedRootForObject(selectedMesh);
+    let normalForRoot: THREE.Vector3 | undefined;
+    if (hit.face?.normal) {
+      const worldNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+      const invRootQuat = new THREE.Quaternion();
+      root.getWorldQuaternion(invRootQuat);
+      invRootQuat.invert();
+      normalForRoot = worldNormal.applyQuaternion(invRootQuat).normalize();
     }
+
+    const regionForRoot = getCoplanarFaceRegionLocalToRoot(hit, root) ?? undefined;
+    this.options.onPickFace?.(root, normalForRoot, regionForRoot);
 
     // ===== NEW: Support meshes without Shape (already extruded) =====
     const ud: any = selectedMesh.userData || {};
@@ -747,6 +693,13 @@ export class ExtrudeTool {
     if (hit.face && hit.face.normal) {
       faceNormalWorld = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
 
+      // Make the face normal consistent with what the user is pointing at:
+      // ensure it points towards the camera (opposes the ray direction).
+      // This fixes "inverted" push/pull direction on backfaces / inner walls and
+      // also keeps hover offset on the visible side.
+      const rayDirWorld = this.raycaster.ray.direction.clone().normalize();
+      if (faceNormalWorld.dot(rayDirWorld) > 0) faceNormalWorld.negate();
+
       // We assume standard "Floor" orientation: Up is Y (Depth).
       // Check dot product with Y axis.
       // But we must convert to proper local space (ignoring rotation) if we want "Alignment".
@@ -773,189 +726,6 @@ export class ExtrudeTool {
         pullDir = 'length';
         axisVector = faceNormalWorld;
         dragSign = Math.sign(localFaceNormal.z);
-      }
-    }
-
-    const isSolid =
-      ud.isExtruded === true ||
-      ud.persistGeometry === true ||
-      ud.extrudeMerged === true ||
-      ud.type === "mass" ||
-      !!ud._solidGeometry ||
-      this.hasAnyStoredSplitRegions(ud);
-
-    let csgPull: ActiveExtrudeState["csgPull"] | undefined;
-    if (isSolid && faceNormalWorld) {
-      const sceneRoot = this.options.getScene();
-      const planeKey = canonicalizePlaneKey(faceNormalWorld, hit.point).key;
-      const splitRegionsByPlane: any = (ud as any).__splitRegionsByPlane;
-      const planeRegions =
-        planeKey && splitRegionsByPlane && Array.isArray(splitRegionsByPlane[planeKey])
-          ? (splitRegionsByPlane[planeKey] as SplitRegion[])
-          : null;
-      const legacyRegions = Array.isArray((ud as any).__splitRegions) ? ((ud as any).__splitRegions as SplitRegion[]) : null;
-
-      let regions: SplitRegion[] | null =
-        (planeRegions?.length ?? 0) > 0 ? planeRegions : (legacyRegions?.length ?? 0) > 0 ? legacyRegions : null;
-
-      if (
-        !regions &&
-        this.autoSplitHoverCache &&
-        this.autoSplitHoverCache.meshUuid === selectedMesh.uuid &&
-        this.autoSplitHoverCache.planeKey === planeKey &&
-        this.autoSplitHoverCache.regions.length > 0
-      ) {
-        regions = this.autoSplitHoverCache.regions;
-      }
-
-      if (!regions) {
-        const faceRegion = getCoplanarFaceRegionLocalToRoot(hit as unknown as THREE.Intersection, sceneRoot);
-        if (faceRegion) {
-          const autoRegions = computeAutoSplitRegionsForFace(
-            sceneRoot,
-            selectedMesh,
-            faceRegion.triangles,
-            faceNormalWorld,
-            hit.point,
-          );
-          const regionsToUse =
-            autoRegions && autoRegions.length > 0
-              ? autoRegions
-              : computeFaceRegionsForFaceTriangles(faceRegion.triangles, faceNormalWorld, hit.point);
-
-          if (autoRegions && autoRegions.length > 0) {
-            this.autoSplitHoverCache = { meshUuid: selectedMesh.uuid, planeKey, regions: autoRegions };
-          } else {
-            this.autoSplitHoverCache = null;
-          }
-
-          if (regionsToUse && regionsToUse.length > 0) regions = regionsToUse;
-        }
-      }
-
-      if (!regions || regions.length === 0) {
-        const geometry = selectedMesh.geometry as THREE.BufferGeometry | undefined;
-        const position = geometry?.getAttribute("position") as THREE.BufferAttribute | undefined;
-        if (geometry && position && typeof hit.faceIndex === "number") {
-          const index = geometry.getIndex();
-          const getTriVertIndex = (tri: number, corner: 0 | 1 | 2) =>
-            index ? index.getX(tri * 3 + corner) : tri * 3 + corner;
-
-          const i0 = getTriVertIndex(hit.faceIndex, 0);
-          const i1 = getTriVertIndex(hit.faceIndex, 1);
-          const i2 = getTriVertIndex(hit.faceIndex, 2);
-
-          if (i0 < position.count && i1 < position.count && i2 < position.count) {
-            selectedMesh.updateWorldMatrix(true, false);
-            const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0)).applyMatrix4(
-              selectedMesh.matrixWorld,
-            );
-            const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1)).applyMatrix4(
-              selectedMesh.matrixWorld,
-            );
-            const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2)).applyMatrix4(
-              selectedMesh.matrixWorld,
-            );
-
-            const plane = canonicalizePlaneKey(faceNormalWorld, hit.point);
-            const qAlign = new THREE.Quaternion().setFromUnitVectors(
-              plane.normal.clone().normalize(),
-              new THREE.Vector3(0, 1, 0),
-            );
-            const p0 = v0.clone().applyQuaternion(qAlign);
-            const p1 = v1.clone().applyQuaternion(qAlign);
-            const p2 = v2.clone().applyQuaternion(qAlign);
-
-            const ring: Array<[number, number]> = [
-              [p0.x, p0.z],
-              [p1.x, p1.z],
-              [p2.x, p2.z],
-              [p0.x, p0.z],
-            ];
-            const cx = (p0.x + p1.x + p2.x) / 3;
-            const cz = (p0.z + p1.z + p2.z) / 3;
-            const planeY = hit.point.clone().applyQuaternion(qAlign).y;
-
-            regions = [
-              {
-                id: `${plane.key}:tri:${hit.faceIndex}`,
-                polygon: [ring],
-                ring,
-                holes: [],
-                center: [cx, cz],
-                basis: { q: [qAlign.x, qAlign.y, qAlign.z, qAlign.w], y: planeY },
-              } as SplitRegion,
-            ];
-          }
-        }
-      }
-
-      if (regions && regions.length > 0) {
-        const picked = pickRegionFromPlaneRegions(regions, hit.point) ?? regions[0];
-
-        let maxInwardDepth: number | undefined;
-        let inwardThickness: number | undefined;
-        let throughDepth: number | undefined;
-
-        const thickBox = new THREE.Box3().setFromObject(selectedMesh);
-        const thickBoxSize = thickBox.getSize(new THREE.Vector3());
-        const n0 = faceNormalWorld.clone().normalize();
-        if (n0.lengthSq() > 1e-12) {
-          const maxDim = Math.max(thickBoxSize.x, thickBoxSize.y, thickBoxSize.z, 1e-6);
-          const rayOffset = Math.max(1e-4, Math.min(1e-2, maxDim * 1e-3));
-          const maxDist = maxDim * 20 + 1;
-
-          const castForThickness = (dir: THREE.Vector3) => {
-            const origin = hit.point.clone().addScaledVector(dir, rayOffset);
-            const rc = new THREE.Raycaster(origin, dir, 0, maxDist);
-            const hits = this.withDoubleSidedMaterials([selectedMesh], () => rc.intersectObject(selectedMesh, false));
-            const exitHit = hits.find((h) => h.distance > rayOffset * 0.25);
-            if (!exitHit || !Number.isFinite(exitHit.distance)) return null;
-            const thickness = exitHit.distance + rayOffset;
-            if (!Number.isFinite(thickness) || thickness < rayOffset * 4) return null;
-            return thickness;
-          };
-
-          const tAlongN = castForThickness(n0);
-          const tAlongNegN = castForThickness(n0.clone().negate());
-          const bestThickness = Math.max(tAlongN ?? 0, tAlongNegN ?? 0);
-          if (bestThickness > 0) {
-            inwardThickness = bestThickness;
-            const minRemain = Math.max(1e-3, Math.min(0.01, bestThickness * 0.03));
-            maxInwardDepth = Math.max(0, bestThickness - minRemain);
-            const throughExtra = Math.max(1e-3, Math.min(0.05, bestThickness * 0.05));
-            throughDepth = bestThickness + throughExtra;
-
-            const inwardDir =
-              tAlongN != null && tAlongNegN != null
-                ? tAlongN >= tAlongNegN
-                  ? n0
-                  : n0.clone().negate()
-                : tAlongN != null
-                  ? n0
-                  : n0.clone().negate();
-            faceNormalWorld = inwardDir.negate().normalize();
-          }
-        }
-
-        const baseGeometry =
-          ((ud as any)._solidGeometry as THREE.BufferGeometry | undefined)?.clone() ??
-          (selectedMesh.geometry as THREE.BufferGeometry).clone();
-        csgPull = {
-          pickPointWorld: hit.point.clone(),
-          hitNormalWorld: (faceNormalWorld ?? new THREE.Vector3(0, 1, 0)).clone(),
-          region: picked,
-          baseGeometry,
-          maxInwardDepth,
-          inwardThickness,
-          throughDepth,
-        };
-
-        // Force CSG pulls to "depth" mode.
-        // Negative depth always means pushing inward.
-        pullDir = "depth";
-        dragSign = 1;
-        axisVector = csgPull.hitNormalWorld.clone();
       }
     }
 
@@ -987,11 +757,7 @@ export class ExtrudeTool {
       borderRadius: '4px',
       background: 'rgba(255,255,255,0.95)'
     });
-    document.body.appendChild(input);
-
     input.value = startDepth.toFixed(2);
-    input.select();
-    setTimeout(() => input.focus(), 10);
 
     const handleInputChange = () => {
       const state = this.active;
@@ -1000,48 +766,15 @@ export class ExtrudeTool {
       const inputValue = parseFloat(input.value);
       if (!Number.isFinite(inputValue)) return;
 
-      let nextDepth = inputValue;
-      if (state.csgPull && nextDepth < 0) {
-        const maxInward = state.csgPull.maxInwardDepth;
-        const thickness = state.csgPull.inwardThickness;
-        const throughDepth = state.csgPull.throughDepth;
-        const absDepth = -nextDepth;
-        const t = Number(thickness);
-        const m = Number(maxInward);
-        const snapTol = Number.isFinite(t) ? Math.max(1e-4, Math.min(0.01, t * 0.02)) : 0;
-        const remaining = Number.isFinite(t) && Number.isFinite(m) ? Math.max(0, t - m) : 0;
-
-        const wantsThrough =
-          Number.isFinite(t) &&
-          (absDepth >= Math.max(0, t - snapTol) ||
-            (Number.isFinite(m) && absDepth > Math.max(0, m) + Math.max(snapTol, remaining * 0.25)));
-
-        if (wantsThrough) {
-          const snapThrough = Number.isFinite(Number(throughDepth)) ? Math.max(0, Number(throughDepth)) : Math.max(0, t);
-          nextDepth = -snapThrough;
-        } else if (Number.isFinite(m) && absDepth > Math.max(0, m)) {
-          nextDepth = -Math.max(0, m);
-        }
-      }
-
-      const nextHollow = state.csgPull ? nextDepth < 0 : nextDepth * state.extrudeNormalWorld.y < 0;
+      const nextDepth = inputValue;
+      const nextHollow = nextDepth < 0;
 
       if (Math.abs(nextDepth - state.lastDepth) > 1e-4) {
         state.lastDepth = nextDepth;
         state.lastHollow = nextHollow;
-        if (state.csgPull) {
-          if (Math.abs(nextDepth - inputValue) > 1e-4) {
-            input.value = nextDepth.toFixed(3);
-          }
-          this.scheduleCsgPullPreview();
-        } else {
-          this.updatePullGeometry(state.mesh, nextDepth, state.pullKind!, state.pullState, nextHollow);
-        }
+        this.updatePullGeometry(state.mesh, nextDepth, state.pullKind!, state.pullState, nextHollow);
       }
     };
-
-    input.addEventListener("input", handleInputChange);
-    (input as any).__cleanupHandler = handleInputChange;
 
     const existingShape = this.getShapeFromMesh(selectedMesh);
 
@@ -1143,6 +876,7 @@ export class ExtrudeTool {
       radius,
       vertices,
       baseY: startBaseY,
+      startMouseX: event.clientX,
       startMouseY: event.clientY,
       inputEl: input,
       pullDir,
@@ -1157,8 +891,7 @@ export class ExtrudeTool {
       collapsedAxes: { x: widthCollapsed, y: heightCollapsed, z: lengthCollapsed }
     };
 
-    // In Pull Mode, keep extrusion orientation stable (surface normal), and only
-    // use face normals to pick which dimension to manipulate.
+    // In Pull Mode, keep extrusion orientation stable (surface normal).
     if (mode === 'pull') {
       axisVector =
         pullDir === 'depth'
@@ -1169,70 +902,103 @@ export class ExtrudeTool {
     // Do not force selection/highlight on extrude.
 
     const dragPlane = this.computeDragPlane(axisVector, hit.point.clone());
-    if (!dragPlane) return;
-
     const hiddenHelpers: ActiveExtrudeState["hiddenHelpers"] = [];
-    selectedMesh.traverse((child) => {
-      if (child === selectedMesh) return;
-      const isHelper = (child.userData as any)?.isHelper === true || child.name === "__edgeWire";
-      if (!isHelper) return;
-      hiddenHelpers.push({ obj: child, visible: child.visible });
-      child.visible = false;
-    });
+    let didActivate = false;
 
-    const basePlaneWorld = new THREE.Plane();
-    {
-      const geom = selectedMesh.geometry as THREE.BufferGeometry | undefined;
-      if (geom && !geom.boundingBox) geom.computeBoundingBox();
-      const bbox = geom?.boundingBox ?? null;
-      const anchorYLocal = bbox ? (startDepth >= 0 ? bbox.min.y : bbox.max.y) : 0;
-      const anchorPointWorld = new THREE.Vector3(0, anchorYLocal, 0);
-      selectedMesh.localToWorld(anchorPointWorld);
-      basePlaneWorld.setFromNormalAndCoplanarPoint(extrudeNormalWorld.clone(), anchorPointWorld);
-    }
+    const cleanupFailedStart = () => {
+      try { input.remove(); } catch { }
 
-    // Get or create shape for persistence
-    const shape =
-      this.getShapeFromMesh(selectedMesh) ??
-      this.buildShapeFromSurfaceMeta(selectedMesh, pullKind, {
-        center: pullState?.center,
-        width: pullState?.width,
-        length: pullState?.length,
-        radius: pullState?.radius,
-        vertices: pullState?.vertices,
-      });
+      for (const entry of hiddenHelpers) {
+        entry.obj.visible = entry.visible;
+      }
 
-    if (!shape) {
-      console.warn("[ExtrudeTool] Could not create shape for mesh.");
-      return;
-    }
+      if (controls && previousControlsEnabled !== null) {
+        controls.enabled = previousControlsEnabled;
+      } else if (controls && previousControlsEnabled === null) {
+        controls.enabled = true;
+      }
 
-    this.active = {
-      mesh: selectedMesh,
-      shape: shape.clone(),
-      originalGeometry: selectedMesh.geometry,
-      startDepth,
-      lastDepth: startDepth,
-      lastHollow: mode === "pull" ? startDepth < 0 : false,
-      axisVector,
-      extrudeNormalWorld: extrudeNormalWorld.clone(),
-      basePlaneWorld,
-      dragPlane,
-      startPlanePoint: hit.point.clone(),
-      faceCenter,
-      pointerId: event.pointerId,
-      previousControlsEnabled,
-      hiddenHelpers,
-      mode,
-      pullKind,
-      pullState,
-      csgPull,
-      initialPointerUpDone: false
     };
 
-    try { (event.target as Element).setPointerCapture(event.pointerId); } catch { }
-    window.addEventListener("pointermove", this.onPointerMove, { capture: true });
-    window.addEventListener("pointerup", this.onPointerUp, { capture: true });
+    try {
+      if (!dragPlane) return;
+
+      selectedMesh.traverse((child) => {
+        if (child === selectedMesh) return;
+        const isHelper = (child.userData as any)?.isHelper === true || child.name === "__edgeWire";
+        if (!isHelper) return;
+        hiddenHelpers.push({ obj: child, visible: child.visible });
+        child.visible = false;
+      });
+
+      const basePlaneWorld = new THREE.Plane();
+      {
+        const geom = selectedMesh.geometry as THREE.BufferGeometry | undefined;
+        if (geom && !geom.boundingBox) geom.computeBoundingBox();
+        const bbox = geom?.boundingBox ?? null;
+        const anchorYLocal = bbox ? (startDepth >= 0 ? bbox.min.y : bbox.max.y) : 0;
+        const anchorPointWorld = new THREE.Vector3(0, anchorYLocal, 0);
+        selectedMesh.localToWorld(anchorPointWorld);
+        basePlaneWorld.setFromNormalAndCoplanarPoint(extrudeNormalWorld.clone(), anchorPointWorld);
+      }
+
+      const shape =
+        this.getShapeFromMesh(selectedMesh) ??
+        this.buildShapeFromSurfaceMeta(selectedMesh, pullKind, {
+          center: pullState?.center,
+          width: pullState?.width,
+          length: pullState?.length,
+          radius: pullState?.radius,
+          vertices: pullState?.vertices,
+        });
+
+      if (!shape) {
+        console.warn("[ExtrudeTool] Could not create shape for mesh.");
+        return;
+      }
+
+      this.active = {
+        mesh: selectedMesh,
+        shape: shape.clone(),
+        originalGeometry: selectedMesh.geometry,
+        startDepth,
+        lastDepth: startDepth,
+        lastHollow: mode === "pull" ? startDepth < 0 : false,
+        axisVector,
+        extrudeNormalWorld: extrudeNormalWorld.clone(),
+        basePlaneWorld,
+        dragPlane,
+        startPlanePoint: hit.point.clone(),
+        faceCenter,
+        pointerId: event.pointerId,
+        previousControlsEnabled,
+        hiddenHelpers,
+        mode,
+        pullKind,
+        pullState,
+        initialPointerUpDone: false
+      };
+
+      // Attach input only after successful activation (prevents "stuck" input on early return)
+      document.body.appendChild(input);
+      input.addEventListener("input", handleInputChange);
+      (input as any).__cleanupHandler = handleInputChange;
+      input.select();
+      setTimeout(() => {
+        try {
+          if (this.active?.pullState?.inputEl === input) input.focus();
+        } catch { }
+      }, 10);
+
+      try { (event.target as Element).setPointerCapture(event.pointerId); } catch { }
+      window.addEventListener("pointermove", this.onPointerMove, { capture: true });
+      window.addEventListener("pointerup", this.onPointerUp, { capture: true });
+      window.addEventListener("pointercancel", this.onPointerCancel, { capture: true });
+
+      didActivate = true;
+    } finally {
+      if (!didActivate) cleanupFailedStart();
+    }
 
     event.preventDefault();
     event.stopPropagation();
@@ -1257,6 +1023,12 @@ export class ExtrudeTool {
     this.finishActiveExtrude({ commit: true, releaseTarget: event.target as Element | null });
   };
 
+  private onPointerCancel = (event: PointerEvent) => {
+    if (!this.active) return;
+    if (event.pointerId !== this.active.pointerId) return;
+    this.cancelActiveExtrude();
+  };
+
   private onPointerMove = (event: PointerEvent) => {
     if (!this.enabled) return;
 
@@ -1274,78 +1046,15 @@ export class ExtrudeTool {
       event.preventDefault();
       event.stopPropagation();
 
-      // Region-based CSG push/pull (solid faces / stored split regions)
-      if (this.active.csgPull) {
-        const planeHit = this.intersectDragPlane(event, this.active.dragPlane);
-        let delta = 0;
-        if (planeHit) {
-          const deltaVec = new THREE.Vector3().subVectors(planeHit, this.active.startPlanePoint);
-          delta = deltaVec.dot(this.active.axisVector);
-        } else {
-          const dy = (this.active.pullState.startMouseY - event.clientY);
-          delta = dy * 0.05;
-        }
-
-        const startD = this.active.pullState.startDepth ?? 0;
-        let nextDepth = startD + delta;
-        const maxInward = this.active.csgPull.maxInwardDepth;
-        const thickness = this.active.csgPull.inwardThickness;
-        const throughDepth = this.active.csgPull.throughDepth;
-        if (nextDepth < 0) {
-          const absDepth = -nextDepth;
-          const t = Number(thickness);
-          const m = Number(maxInward);
-          const snapTol = Number.isFinite(t) ? Math.max(1e-4, Math.min(0.01, t * 0.02)) : 0;
-          const remaining = Number.isFinite(t) && Number.isFinite(m) ? Math.max(0, t - m) : 0;
-
-          const wantsThrough =
-            Number.isFinite(t) &&
-            (absDepth >= Math.max(0, t - snapTol) ||
-              (Number.isFinite(m) && absDepth > Math.max(0, m) + Math.max(snapTol, remaining * 0.25)));
-
-          if (wantsThrough) {
-            const snapThrough = Number.isFinite(Number(throughDepth)) ? Math.max(0, Number(throughDepth)) : Math.max(0, t);
-            nextDepth = -snapThrough;
-          } else if (Number.isFinite(m) && absDepth > Math.max(0, m)) {
-            nextDepth = -Math.max(0, m);
-          }
-        }
-        const nextHollow = nextDepth < 0;
-
-        if (Math.abs(nextDepth - this.active.lastDepth) <= 1e-4) return;
-
-        this.active.lastDepth = nextDepth;
-        this.active.lastHollow = nextHollow;
-        this.active.pullState.inputEl.value = nextDepth.toFixed(3);
-        this.scheduleCsgPullPreview();
-
-        if (this.hoverOverlay?.group.visible) {
-          const depthOffset = this.active.lastDepth - (this.active.startDepth ?? 0);
-          const v = this.active.axisVector.clone();
-          const len = v.length();
-          if (len > 1e-10) v.multiplyScalar(depthOffset / len);
-          else v.set(0, 0, 0);
-          this.hoverOverlay.group.position.copy(v);
-        }
-        return;
-      }
-
       const state = this.active.pullState;
 
-      // Calculate delta based on 3D drag plane if possible, falling back to 2D
-      const planeHit = this.intersectDragPlane(event, this.active.dragPlane);
-
-      let delta = 0;
-      if (planeHit) {
-        // Delta is projection of drag onto Axis.
-        // If Dragging along Axis, delta is positive.
-        const deltaVec = new THREE.Vector3().subVectors(planeHit, this.active.startPlanePoint);
-        delta = deltaVec.dot(this.active.axisVector);
-      } else {
-        // Fallback to 2D
-        const dy = (state.startMouseY - event.clientY);
-        delta = dy * 0.05;
-      }
+      const delta = this.getAxisDragDelta(
+        event,
+        state.startMouseX,
+        state.startMouseY,
+        this.active.axisVector,
+        this.active.startPlanePoint,
+      );
 
       const activeDir = state.pullDir;
 
@@ -1392,9 +1101,7 @@ export class ExtrudeTool {
         const prevBaseY = state.baseY ?? 0;
         state.baseY = nextBaseY;
 
-        // Hollow is only allowed if mesh is already merged/unioned (not single mesh)
-        const isMerged = this.active.mesh.userData.extrudeMerged === true;
-        const nextHollow = isMerged && nextDepth * this.active.axisVector.y < 0;
+        const nextHollow = nextDepth < 0;
 
         if (Math.abs(nextDepth - this.active.lastDepth) > 1e-4 || Math.abs(nextBaseY - prevBaseY) > 1e-4) {
           this.updatePullGeometry(this.active.mesh, nextDepth, this.active.pullKind!, state, nextHollow);
@@ -1498,91 +1205,16 @@ export class ExtrudeTool {
     this.active.lastHollow = openHole;
   };
 
-  private disposeTempMeshResources(tempMesh: THREE.Mesh) {
-    try { (tempMesh.geometry as THREE.BufferGeometry | undefined)?.dispose?.(); } catch { }
-    const mats = Array.isArray(tempMesh.material) ? tempMesh.material : [tempMesh.material];
-    for (const m of mats) {
-      try { (m as THREE.Material)?.dispose?.(); } catch { }
-    }
-  }
-
-  private scheduleCsgPullPreview() {
-    if (this.csgPreviewRafId != null) return;
-
-    this.csgPreviewRafId = window.requestAnimationFrame(() => {
-      this.csgPreviewRafId = null;
-      const state = this.active;
-      if (!state?.csgPull) return;
-
-      const pullSigned = state.lastDepth;
-      if (Math.abs(pullSigned - this.csgPreviewLastDepth) < 1e-4) return;
-      this.csgPreviewLastDepth = pullSigned;
-
-      const meshUd: any = state.mesh.userData || {};
-      if (meshUd.__extrudeEdges) (meshUd.__extrudeEdges as THREE.Object3D).visible = false;
-
-      // Near-zero = restore original (avoid boolean jitter).
-      if (Math.abs(pullSigned) <= 1e-4) {
-        const current = state.mesh.geometry;
-        state.mesh.geometry = state.originalGeometry;
-        if (current !== state.originalGeometry) {
-          try { (current as THREE.BufferGeometry).dispose(); } catch { }
-        }
-        return;
-      }
-
-      const cutter = buildCutterFromRegion(state.csgPull.region, pullSigned, state.csgPull.hitNormalWorld);
-      let nextGeom = computePushPullCSGGeometryLocal(state.mesh, cutter, pullSigned, state.csgPull.baseGeometry);
-      this.disposeTempMeshResources(cutter);
-
-      if (!nextGeom) return;
-
-      if (pullSigned < 0) {
-        const capPointLocal = state.csgPull.pickPointWorld
-          .clone()
-          .add(state.csgPull.hitNormalWorld.clone().multiplyScalar(pullSigned));
-        state.mesh.worldToLocal(capPointLocal);
-
-        const invWorldRot = new THREE.Quaternion();
-        state.mesh.getWorldQuaternion(invWorldRot);
-        invWorldRot.invert();
-        const normalLocal = state.csgPull.hitNormalWorld.clone().applyQuaternion(invWorldRot).normalize();
-
-        const capPlaneLocal = new THREE.Plane().setFromNormalAndCoplanarPoint(normalLocal, capPointLocal);
-        const strippedGeom = stripCapAtPlane(nextGeom, capPlaneLocal, 0.01);
-        if (strippedGeom !== nextGeom) {
-          nextGeom.dispose();
-          nextGeom = strippedGeom;
-        }
-      }
-
-      const oldGeom = state.mesh.geometry;
-      state.mesh.geometry = nextGeom;
-      if (oldGeom !== state.originalGeometry) {
-        try { (oldGeom as THREE.BufferGeometry).dispose(); } catch { }
-      }
-    });
-  }
-
   private finishActiveExtrude(options: { commit: boolean; releaseTarget?: Element | null }) {
     const state = this.active;
     if (!state) return;
     this.active = null;
 
-    if (this.csgPreviewRafId != null) {
-      try { cancelAnimationFrame(this.csgPreviewRafId); } catch { }
-      this.csgPreviewRafId = null;
-    }
-    this.csgPreviewLastDepth = Number.NaN;
-
     window.removeEventListener("pointermove", this.onPointerMove, { capture: true });
     window.removeEventListener("pointerup", this.onPointerUp, { capture: true });
+    window.removeEventListener("pointercancel", this.onPointerCancel, { capture: true });
 
-    try {
-      options.releaseTarget?.releasePointerCapture?.(state.pointerId);
-    } catch {
-      // ignore
-    }
+    options.releaseTarget?.releasePointerCapture?.(state.pointerId); 
 
     this.setHoverOverlayVisible(false);
 
@@ -1603,69 +1235,7 @@ export class ExtrudeTool {
     }
 
     if (options.commit) {
-      if (state.csgPull) {
-        const pullSigned = state.lastDepth;
-        const hadPreview = state.mesh.geometry !== state.originalGeometry;
-
-        if (Math.abs(pullSigned) > 1e-4) {
-          const cutter = buildCutterFromRegion(state.csgPull.region, pullSigned, state.csgPull.hitNormalWorld);
-          const applied = applyPushPullCSG(state.mesh, cutter, pullSigned, state.csgPull.baseGeometry);
-
-          if (applied) {
-            const solidClone = (state.mesh.geometry as THREE.BufferGeometry).clone();
-
-            if (pullSigned < 0) {
-              const capPointLocal = state.csgPull.pickPointWorld
-                .clone()
-                .add(state.csgPull.hitNormalWorld.clone().multiplyScalar(pullSigned));
-              state.mesh.worldToLocal(capPointLocal);
-
-              const invWorldRot = new THREE.Quaternion();
-              state.mesh.getWorldQuaternion(invWorldRot);
-              invWorldRot.invert();
-              const normalLocal = state.csgPull.hitNormalWorld.clone().applyQuaternion(invWorldRot).normalize();
-
-              const capPlaneLocal = new THREE.Plane().setFromNormalAndCoplanarPoint(normalLocal, capPointLocal);
-              const strippedGeom = stripCapAtPlane(state.mesh.geometry, capPlaneLocal, 0.01);
-              if (strippedGeom !== state.mesh.geometry) {
-                state.mesh.geometry.dispose();
-                state.mesh.geometry = strippedGeom;
-              }
-            }
-
-            if (hadPreview) {
-              try { state.originalGeometry.dispose(); } catch { }
-            }
-
-            const udAfter: any = state.mesh.userData || {};
-            if (udAfter._solidGeometry && udAfter._solidGeometry !== solidClone) {
-              try { (udAfter._solidGeometry as THREE.BufferGeometry).dispose(); } catch { }
-            }
-            udAfter._solidGeometry = solidClone;
-            udAfter.extrudeMerged = true;
-            udAfter.persistGeometry = true;
-            udAfter.isExtruded = true;
-            delete udAfter.extrudeShape;
-            delete udAfter.surfaceMeta;
-            state.mesh.userData = udAfter;
-
-            this.updateEdgesHelper(state.mesh);
-          } else {
-            const current = state.mesh.geometry;
-            state.mesh.geometry = state.originalGeometry;
-            if (current !== state.originalGeometry) {
-              try { (current as THREE.BufferGeometry).dispose(); } catch { }
-            }
-          }
-        } else {
-          const current = state.mesh.geometry;
-          state.mesh.geometry = state.originalGeometry;
-          if (current !== state.originalGeometry) {
-            try { (current as THREE.BufferGeometry).dispose(); } catch { }
-          }
-        }
-      } else {
-        const ud: any = state.mesh.userData || {};
+      const ud: any = state.mesh.userData || {};
         ud.extrudeDepth = state.lastDepth;
         ud.extrudeHollow = state.lastHollow;
         ud.extrudeWallThickness = 0;
@@ -1736,17 +1306,11 @@ export class ExtrudeTool {
         this.removeFloorOutlines(state.mesh);
       }
 
-      // Attempt merge if confirmed and hollow (updates geometry again).
-      if (state.mesh.userData.extrudeHollow) {
-        this.tryMergeSimpleHollows(state.mesh);
-      }
-
       this.updateEdgesHelper(state.mesh);
 
       // Free the original geometry if it was replaced.
       if (state.mesh.geometry !== state.originalGeometry) {
         state.originalGeometry.dispose();
-      }
       }
     } else {
       const current = state.mesh.geometry;
@@ -1754,10 +1318,9 @@ export class ExtrudeTool {
       if (current !== state.originalGeometry) {
         current.dispose();
       }
-    }
 
-    if (state.csgPull) {
-      try { state.csgPull.baseGeometry.dispose(); } catch { }
+      const udRestore: any = state.mesh.userData || {};
+      if (udRestore.__extrudeEdges) (udRestore.__extrudeEdges as THREE.Object3D).visible = true;
     }
 
     for (const entry of state.hiddenHelpers) {
@@ -1765,128 +1328,7 @@ export class ExtrudeTool {
     }
 
     this.active = null;
-  }
-
-  private tryMergeSimpleHollows(target: THREE.Mesh) {
-    const shape = this.getShapeFromMesh(target);
-    const depth = this.getDepthFromMesh(target);
-
-    // Target is assumed to be a fresh simple extrusion (has shape & depth).
-    if (!shape) return;
-
-    const scene = this.options.getScene();
-    const targetBox = new THREE.Box3().setFromObject(target);
-    const candidates: THREE.Mesh[] = [];
-
-    scene.traverse((obj) => {
-      if (obj === target) return;
-      if (!(obj as any).isMesh) return;
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.visible || mesh.userData.isHelper) return;
-      if (mesh.userData.extrudeHollow !== true) return;
-
-      // If candidate is already merged, we require its Solid Geometry to mix safely.
-      // If Simple, we can rebuild.
-      const isSimple = !!this.getShapeFromMesh(mesh);
-      const isMerged = mesh.userData.extrudeMerged === true;
-      const hasSolid = !!(mesh.userData as any)._solidGeometry;
-
-      if (!isSimple && (!isMerged || !hasSolid)) return;
-
-      // Check overlap
-      const otherBox = new THREE.Box3().setFromObject(mesh);
-      if (!targetBox.intersectsBox(otherBox)) return;
-
-      candidates.push(mesh);
-    });
-
-    if (candidates.length === 0) return;
-
-    // 1. Target Brush (Rebuild Solid)
-    const targetSolidGeom = buildExtrusionGeometry(shape, depth, { hollow: false });
-    targetSolidGeom.rotateX(-Math.PI / 2);
-    const targetBrush = new Brush(targetSolidGeom);
-    targetBrush.applyMatrix4(target.matrixWorld);
-    targetBrush.updateMatrixWorld(true);
-
-    // 2. Evaluator
-    const evaluator = new Evaluator();
-    evaluator.useGroups = false;
-
-    let resultBrush = targetBrush;
-    const brushesToCleanup: Brush[] = [targetBrush];
-
-    for (const cand of candidates) {
-      let cBrush: Brush;
-
-      if (cand.userData.extrudeMerged === true && (cand.userData as any)._solidGeometry) {
-        // Use Cached Solid
-        const geom = (cand.userData as any)._solidGeometry.clone();
-        cBrush = new Brush(geom);
-        cBrush.applyMatrix4(cand.matrixWorld);
-        cBrush.updateMatrixWorld(true);
-      } else {
-        // Rebuild Simple
-        const cShape = this.getShapeFromMesh(cand)!;
-        const cDepth = this.getDepthFromMesh(cand);
-        const cGeom = buildExtrusionGeometry(cShape, cDepth, { hollow: false });
-        cGeom.rotateX(-Math.PI / 2);
-        cBrush = new Brush(cGeom);
-        cBrush.applyMatrix4(cand.matrixWorld);
-        cBrush.updateMatrixWorld(true);
-      }
-
-      const nextResult = evaluator.evaluate(resultBrush, cBrush, ADDITION);
-
-      brushesToCleanup.push(cBrush);
-      if (resultBrush !== targetBrush) brushesToCleanup.push(resultBrush);
-      resultBrush = nextResult;
-    }
-
-    // 3. Process Result
-    // Result is World Space Solid (conceptually), but the Brush might have a transform.
-    const resultBrushMesh = resultBrush as any;
-    if (resultBrushMesh.updateMatrixWorld) resultBrushMesh.updateMatrixWorld();
-
-    // We want to move from ResultBrush Space -> World -> Target Local
-    // T_final = invTarget * ResultBrush.MatrixWorld
-    const transform = target.matrixWorld.clone().invert().multiply(resultBrushMesh.matrixWorld);
-
-    const resultGeomWorld = resultBrush.geometry as THREE.BufferGeometry;
-
-    // Check if resultGeomWorld needs to be cloned or if it's new. It is new from Evaluator.
-    const solidLocal = resultGeomWorld.clone();
-    solidLocal.applyMatrix4(transform);
-
-    (target.userData as any)._solidGeometry = solidLocal;
-
-    // Create Display Geometry (Stripped Cap)
-    const openGeom = this.stripCapAtAxis(solidLocal.clone(), "y", 0, 1e-3);
-
-    // 4. Update Target
-    const prevGeom = target.geometry;
-    target.geometry = openGeom;
-    prevGeom.dispose();
-
-    target.userData.extrudeMerged = true;
-    delete target.userData.extrudeShape;
-    delete target.userData.surfaceMeta;
-
-    // 5. Cleanup Candidates
-    for (const cand of candidates) {
-      cand.removeFromParent();
-      cand.geometry.dispose();
-      if ((cand.userData as any)._solidGeometry) {
-        try { (cand.userData as any)._solidGeometry.dispose(); } catch { }
-      }
-    }
-
-    // Cleanup Brushes
-    for (const b of brushesToCleanup) {
-      if (b.geometry) b.geometry.dispose();
-      if (b.disposeCacheData) b.disposeCacheData();
-    }
-  }
+  } 
 
   private stripCapAtAxis(
     geometry: THREE.BufferGeometry,
@@ -1984,6 +1426,43 @@ export class ExtrudeTool {
   private cancelActiveExtrude() {
     if (!this.active) return;
     this.finishActiveExtrude({ commit: false, releaseTarget: this.container });
+  }
+
+  private getAxisDragDelta(
+    event: PointerEvent,
+    startMouseX: number,
+    startMouseY: number,
+    axisWorld: THREE.Vector3,
+    anchorWorld: THREE.Vector3,
+  ) {
+    const axis = axisWorld.clone();
+    const axisLen = axis.length();
+    if (!Number.isFinite(axisLen) || axisLen < 1e-10) return 0;
+    axis.multiplyScalar(1 / axisLen);
+
+    const rect = this.container.getBoundingClientRect();
+    const camera = this.getCamera();
+
+    const p0 = anchorWorld.clone();
+    const p1 = anchorWorld.clone().addScaledVector(axis, 1);
+
+    const ndc0 = p0.project(camera);
+    const ndc1 = p1.project(camera);
+
+    const s0 = new THREE.Vector2((ndc0.x * 0.5 + 0.5) * rect.width, (-ndc0.y * 0.5 + 0.5) * rect.height);
+    const s1 = new THREE.Vector2((ndc1.x * 0.5 + 0.5) * rect.width, (-ndc1.y * 0.5 + 0.5) * rect.height);
+
+    const axisScreenDir = s1.sub(s0);
+    if (!Number.isFinite(axisScreenDir.x) || !Number.isFinite(axisScreenDir.y) || axisScreenDir.lengthSq() < 1e-6) {
+      // Axis is almost aligned with view direction; fall back to screen-up/down.
+      axisScreenDir.set(0, -1);
+    } else {
+      axisScreenDir.normalize();
+    }
+
+    const drag = new THREE.Vector2(event.clientX - startMouseX, event.clientY - startMouseY);
+    const pixels = drag.dot(axisScreenDir);
+    return pixels * 0.05;
   }
 
   private getSelectedExtrudableMesh(): THREE.Mesh | null {
@@ -2093,8 +1572,15 @@ export class ExtrudeTool {
     this.raycaster.setFromCamera(this.mouse, this.getCamera());
 
     try {
-      const hits = this.raycaster.intersectObject(mesh, true);
-      return hits[0] ?? null;
+      const hits = this.withDoubleSidedMaterials([mesh], () => this.raycaster.intersectObject(mesh, false));
+      return (
+        hits.find((h) => {
+          const obj: any = h.object as any;
+          if (!obj || obj.userData?.isHelper) return false;
+          if (!(obj as any).isMesh) return false;
+          return typeof h.faceIndex === "number" && !!h.face?.normal;
+        }) ?? null
+      );
     } catch {
       return null;
     }
@@ -2107,29 +1593,17 @@ export class ExtrudeTool {
     });
 
     for (const obj of toRemove) {
-      try {
-        obj.removeFromParent();
-      } catch {
-        // ignore
-      }
+      obj.removeFromParent(); 
 
       const anyObj = obj as any;
       if (anyObj.geometry?.dispose) {
-        try {
-          anyObj.geometry.dispose();
-        } catch {
-          // ignore
-        }
+        anyObj.geometry.dispose(); 
       }
 
       if (anyObj.material) {
         const materials = Array.isArray(anyObj.material) ? anyObj.material : [anyObj.material];
         for (const mat of materials) {
-          try {
-            mat.dispose?.();
-          } catch {
-            // ignore
-          }
+          mat.dispose?.(); 
         }
       }
     }
@@ -2137,51 +1611,58 @@ export class ExtrudeTool {
 
   private updateEdgesHelper(mesh: THREE.Mesh) {
     const ud: any = mesh.userData || {};
-    const prev = ud.__extrudeEdges as THREE.LineSegments | undefined;
-    if (prev) {
-      prev.removeFromParent();
-      try {
-        (prev.geometry as THREE.BufferGeometry).dispose();
-      } catch {
-        // ignore
-      }
-      try {
-        (prev.material as THREE.Material).dispose();
-      } catch {
-        // ignore
-      }
-      delete ud.__extrudeEdges;
-    }
+    const prev = ud.__extrudeEdges as THREE.Object3D | undefined;
 
-    const baseGeometry = mesh.geometry as THREE.BufferGeometry | undefined;
-    const position = baseGeometry?.getAttribute("position") as THREE.BufferAttribute | undefined;
+    // Cleanup existing outlines (stored ref + any leaked children)
+    const candidates = [
+      prev,
+      ...(mesh.children || []).filter((c: any) => c?.userData?.isExtrudeOutline === true),
+      ...(mesh.children || []).filter((c: any) => c?.name === "__edgeWire"),
+    ].filter(Boolean) as THREE.Object3D[];
 
-    let edges: THREE.EdgesGeometry;
-    if (baseGeometry && position) {
-      const temp = new THREE.BufferGeometry();
-      temp.setAttribute("position", position);
-      if (baseGeometry.index) temp.setIndex(baseGeometry.index);
-      const welded = mergeVertices(temp, 1e-3);
-      temp.dispose();
-      edges = new THREE.EdgesGeometry(welded, 45);
-      welded.dispose();
-    } else {
-      edges = new THREE.EdgesGeometry(mesh.geometry, 45);
+    for (const obj of candidates) {
+      obj.removeFromParent();
+      const anyObj: any = obj as any;
+      if (anyObj.geometry?.dispose) {
+        try { anyObj.geometry.dispose(); } catch { }
+      }
+      const mat: any = anyObj.material;
+      if (mat) {
+        const mats = Array.isArray(mat) ? mat : [mat];
+        for (const m of mats) {
+          try { m?.dispose?.(); } catch { }
+        }
+      }
     }
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x1f1f1f,
-      depthWrite: false,
-      depthTest: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1
-    });
-    const helper = new THREE.LineSegments(edges, mat);
-    helper.renderOrder = 2;
-    helper.userData = { selectable: false, isHelper: true, isExtrudeOutline: true };
-    mesh.add(helper);
-    ud.__extrudeEdges = helper;
+    delete ud.__extrudeEdges;
+    delete ud.__extrudeEdgesVersion;
+
+    if (!ENABLE_EXTRUDE_OUTLINES) return;
+
+    ud.__extrudeEdgesVersion = EXTRUDE_OUTLINE_VERSION;
     mesh.userData = ud;
+  }
+
+  private restoreOutlines() {
+    const scene = this.options.getScene();
+    scene.traverse((obj) => {
+      if (!(obj as any).isMesh) return;
+      const mesh = obj as THREE.Mesh;
+      const ud: any = mesh.userData || {};
+
+      const isSolid =
+        ud.isExtruded === true ||
+        ud.persistGeometry === true ||
+        ud.extrudeMerged === true ||
+        ud.type === "mass" ||
+        !!ud._solidGeometry ||
+        this.hasAnyStoredSplitRegions(ud);
+
+      const outlineVersionOk = ud.__extrudeEdgesVersion === EXTRUDE_OUTLINE_VERSION;
+      if (isSolid && (!ud.__extrudeEdges || !outlineVersionOk)) {
+        this.updateEdgesHelper(mesh);
+      }
+    });
   }
 
   private updatePullGeometry(mesh: THREE.Mesh, depth: number, kind: string, state: any, hollow: boolean) {
@@ -2297,12 +1778,7 @@ export class ExtrudeTool {
       }
 
       // Convert World -> Local to get the geometry translation vector
-      try {
-        mesh.worldToLocal(offset);
-      } catch {
-        // ignore
-      }
-
+      mesh.worldToLocal(offset);
       geometry.translate(offset.x, offset.y, offset.z);
     }
 
@@ -2373,6 +1849,8 @@ export class ExtrudeTool {
         this.hasAnyStoredSplitRegions(ud);
       if (isSolid && hit.face?.normal) {
         const faceNormalWorld = hit.face.normal.clone().transformDirection(selectedMesh.matrixWorld).normalize();
+        const rayDirWorld = this.raycaster.ray.direction.clone().normalize();
+        if (faceNormalWorld.dot(rayDirWorld) > 0) faceNormalWorld.negate();
         const planeKey = canonicalizePlaneKey(faceNormalWorld, hit.point).key;
 
         let regions: SplitRegion[] | null = null;

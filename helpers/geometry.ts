@@ -10,8 +10,9 @@ export function createWeldedEdgesGeometry(
   if (!pos) return new THREE.EdgesGeometry(geometry, thresholdAngle);
 
   const temp = new THREE.BufferGeometry();
-  temp.setAttribute("position", pos);
-  if (geometry.index) temp.setIndex(geometry.index);
+  // Important: clone attributes so disposing temp doesn't affect the source geometry GPU buffers.
+  temp.setAttribute("position", pos.clone());
+  if (geometry.index) temp.setIndex(geometry.index.clone());
 
   const welded = mergeVertices(temp, mergeTol);
   temp.dispose();
