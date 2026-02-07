@@ -1,4 +1,4 @@
-## Satu lagi repo WebBIMEngine yang agak konyol
+# Simpler WebBIMEngine - Vanilla TypeScript
 
 Proyek Simpler-WebBIMEngine ini sebenernya jalan, walaupun gw nggak terlalu puas sama beberapa keputusan arsitekturnya (terutama di bagian core engine-nya, dan gw mulai agak sebel sama cara handling state-nya walaupun sebenernya enak juga buat debugging).
 
@@ -13,6 +13,6 @@ Satu lagi: catet juga kalo visualizer dan tools di sini sebenernya ditulis pake 
 Model yang dipake buat ngoding ini:
 - **Claude**
 - **Gemini Pro**
-(versi terbaru saat ini gemeini 3 dan claude 4.5)
+(versi terbaru saat ini gemini 3 dan claude 4.5)
 
 Jadi kalau ada kode yang aneh, ya itu emang bagian dari "kode ringkih"-nya.
